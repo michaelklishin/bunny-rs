@@ -1,0 +1,45 @@
+[package]
+name = "bunny-rs"
+version = "0.9.0"
+edition = "2024"
+rust-version = "1.94"
+description = "A modern, ergonomic RabbitMQ (AMQP 0-9-1) client for Rust"
+license = "MIT OR Apache-2.0"
+keywords = ["rabbitmq", "amqp", "messaging", "async", "tokio"]
+categories = ["network-programming", "asynchronous"]
+
+[dependencies]
+bytes = "1"
+compact_str = "0.8"
+fastrand = "2"
+nom = "8"
+simdutf8 = "0.1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+tracing = "0.1"
+url = "2"
+zeroize = { version = "1.8", features = ["zeroize_derive"], optional = true }
+
+# TLS (optional, default on)
+tokio-rustls = { version = "0.26", optional = true }
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "aws-lc-rs"], optional = true }
+rustls-pki-types = { version = "1", optional = true }
+rustls-pemfile = { version = "2", optional = true }
+rustls-platform-verifier = { version = "0.5", optional = true }
+
+[dev-dependencies]
+proptest = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[features]
+default = ["tls"]
+zeroize = ["dep:zeroize"]
+tls = [
+    "dep:tokio-rustls",
+    "dep:rustls",
+    "dep:rustls-pki-types",
+    "dep:rustls-pemfile",
+    "dep:rustls-platform-verifier",
+]
