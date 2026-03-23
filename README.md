@@ -60,8 +60,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Publishing
 
+Routes to the queue via the [default exchange](https://www.rabbitmq.com/tutorials/amqp-concepts#exchange-default)
+(`""`), using queue name as the routing key:
+
 ```rust
 ch.publish("", "queue-name", b"Hello!").await?;
+```
+
+Via `amq.fanout` (a fanout exchange), which routes
+to all bound queues unconditionally:
+
+```rust
+ch.publish("amq.fanout", "", b"broadcast!").await?;
+```
+
+Via `amq.topic` (a topic exchange) with a routing key:
+
+```rust
+ch.publish("amq.topic", "orders.eu.new", b"{\"id\": 1}").await?;
 ```
 
 With message properties:
