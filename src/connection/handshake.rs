@@ -96,11 +96,7 @@ pub(crate) async fn perform(
         tune_args.frame_max.min(opts.frame_max)
     };
 
-    let heartbeat = if tune_args.heartbeat == 0 || opts.heartbeat == 0 {
-        0
-    } else {
-        tune_args.heartbeat.min(opts.heartbeat)
-    };
+    let heartbeat = negotiate_heartbeat(tune_args.heartbeat, opts.heartbeat);
 
     // Send tune-ok
     let tune_ok = Method::ConnectionTuneOk(Box::new(ConnectionTuneOkArgs {
@@ -175,4 +171,15 @@ async fn send_method(
     transport.write_all(&out).await?;
     transport.flush().await?;
     Ok(())
+}
+
+/// Negotiate heartbeat interval:
+/// if either side proposes 0, use the non-zero value (or 0 if both are 0);
+/// otherwise use the smaller value.
+pub fn negotiate_heartbeat(server: u16, client: u16) -> u16 {
+    if server == 0 || client == 0 {
+        server.max(client)
+    } else {
+        server.min(client)
+    }
 }
