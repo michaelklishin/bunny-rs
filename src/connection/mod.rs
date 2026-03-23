@@ -4,6 +4,7 @@
 
 pub mod endpoint;
 mod handshake;
+pub use handshake::negotiate_heartbeat;
 pub(crate) mod recovery;
 pub mod topology;
 
@@ -12,7 +13,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use bytes::BytesMut;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -289,7 +291,10 @@ struct ConnectionInner {
     recovery_config: recovery::RecoveryConfig,
     recovery_filter: Mutex<Option<TopologyRecoveryFilter>>,
     event_tx: broadcast::Sender<ConnectionEvent>,
-    last_activity: AtomicU64,
+    last_sent_activity: AtomicU64,
+    /// Incremented on each recovery so that writer and heartbeat loops
+    /// from a previous connection notice the change and exit.
+    connection_recovery_epoch: AtomicU64,
 }
 
 /// AMQP 0-9-1 connection to a RabbitMQ node.
@@ -392,25 +397,30 @@ impl Connection {
             recovery_config: recovery::RecoveryConfig::default(),
             recovery_filter: Mutex::new(None),
             event_tx: broadcast::channel(16).0,
-            last_activity: AtomicU64::new(now_millis()),
+            last_sent_activity: AtomicU64::new(monotonic_millis()),
+            connection_recovery_epoch: AtomicU64::new(0),
         });
 
+        let generation = inner.connection_recovery_epoch.load(Ordering::Relaxed);
         let writer_inner = inner.clone();
         tokio::spawn(async move {
-            writer_loop(writer, writer_rx).await;
-            writer_inner.is_open.store(false, Ordering::Release);
+            writer_loop(writer, writer_rx, &writer_inner).await;
+            // Skip if recovery has already established a newer connection.
+            if writer_inner.connection_recovery_epoch.load(Ordering::Relaxed) == generation {
+                writer_inner.is_open.store(false, Ordering::Release);
+            }
         });
 
         let reader_inner = inner.clone();
         tokio::spawn(async move {
-            reader_loop(reader, read_buf, codec, reader_inner).await;
+            reader_loop(reader, read_buf, codec, reader_inner, generation).await;
         });
 
         if negotiated.heartbeat > 0 {
             let hb_inner = inner.clone();
             let interval_secs = negotiated.heartbeat as u64;
             tokio::spawn(async move {
-                heartbeat_loop(hb_inner, interval_secs).await;
+                heartbeat_loop(hb_inner, interval_secs, generation).await;
             });
         }
 
@@ -559,6 +569,7 @@ impl Connection {
 async fn writer_loop(
     mut writer: tokio::io::WriteHalf<Transport>,
     mut rx: mpsc::Receiver<WriterCommand>,
+    inner: &ConnectionInner,
 ) {
     let mut buf = BytesMut::with_capacity(64 * 1024);
     let mut codec = AmqpCodec::new_framing(DEFAULT_FRAME_MAX);
@@ -585,6 +596,9 @@ async fn writer_loop(
         if writer.flush().await.is_err() {
             break;
         }
+        inner
+            .last_sent_activity
+            .store(monotonic_millis(), Ordering::Relaxed);
         buf.clear();
     }
 }
@@ -607,8 +621,9 @@ fn reader_loop(
     read_buf: BytesMut,
     codec: AmqpCodec,
     inner: Arc<ConnectionInner>,
+    generation: u64,
 ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-    Box::pin(reader_loop_impl(reader, read_buf, codec, inner))
+    Box::pin(reader_loop_impl(reader, read_buf, codec, inner, generation))
 }
 
 async fn reader_loop_impl(
@@ -616,8 +631,14 @@ async fn reader_loop_impl(
     read_buf: BytesMut,
     codec: AmqpCodec,
     inner: Arc<ConnectionInner>,
+    generation: u64,
 ) {
     read_frames(reader, read_buf, codec, &inner).await;
+
+    // A newer connection was established via recovery; this reader is stale.
+    if inner.connection_recovery_epoch.load(Ordering::Relaxed) != generation {
+        return;
+    }
 
     // Connection lost. Attempt recovery if enabled.
     inner.is_open.store(false, Ordering::Release);
@@ -737,12 +758,22 @@ async fn reader_loop_impl(
             let (new_reader, new_writer) = tokio::io::split(transport);
             let (new_writer_tx, new_writer_rx) = mpsc::channel::<WriterCommand>(128);
 
-            // Swap writer
+            // Advance the epoch so loops from the old connection notice and exit.
+            let generation = inner.connection_recovery_epoch.fetch_add(1, Ordering::Relaxed) + 1;
+
+            // Swap writer and reset activity tracking for the fresh connection
             *inner.writer_tx.lock().await = new_writer_tx;
+            inner
+                .last_sent_activity
+                .store(monotonic_millis(), Ordering::Relaxed);
             inner.is_open.store(true, Ordering::Release);
 
+            let writer_inner = inner.clone();
             tokio::spawn(async move {
-                writer_loop(new_writer, new_writer_rx).await;
+                writer_loop(new_writer, new_writer_rx, &writer_inner).await;
+                if writer_inner.connection_recovery_epoch.load(Ordering::Relaxed) == generation {
+                    writer_inner.is_open.store(false, Ordering::Release);
+                }
             });
             let inner2 = inner.clone();
             let frame_max = inner2.negotiated_frame_max;
@@ -752,9 +783,19 @@ async fn reader_loop_impl(
                     BytesMut::with_capacity(8192),
                     AmqpCodec::new_framing(frame_max),
                     inner2,
+                    generation,
                 )
                 .await;
             }));
+
+            // Restart heartbeat loop for the recovered connection
+            if inner.negotiated_heartbeat > 0 {
+                let hb_inner = inner.clone();
+                let interval_secs = inner.negotiated_heartbeat as u64;
+                tokio::spawn(async move {
+                    heartbeat_loop(hb_inner, interval_secs, generation).await;
+                });
+            }
         }
         None => {
             tracing::error!("recovery failed, connection permanently closed");
@@ -771,6 +812,14 @@ async fn read_frames(
     mut codec: AmqpCodec,
     inner: &ConnectionInner,
 ) {
+    // When heartbeats are enabled, time out after 2× the negotiated interval
+    // with no data from the peer (allows one missed heartbeat as slack).
+    let read_timeout = if inner.negotiated_heartbeat > 0 {
+        Some(Duration::from_secs(inner.negotiated_heartbeat as u64 * 2))
+    } else {
+        None
+    };
+
     loop {
         loop {
             match codec.decode(&mut read_buf) {
@@ -781,7 +830,22 @@ async fn read_frames(
         }
 
         let mut tmp = [0u8; 8192];
-        match reader.read(&mut tmp).await {
+        let read_result = if let Some(timeout) = read_timeout {
+            match tokio::time::timeout(timeout, reader.read(&mut tmp)).await {
+                Ok(result) => result,
+                Err(_) => {
+                    tracing::warn!(
+                        heartbeat = inner.negotiated_heartbeat,
+                        "detected missed heartbeats from the server, closing connection"
+                    );
+                    return;
+                }
+            }
+        } else {
+            reader.read(&mut tmp).await
+        };
+
+        match read_result {
             Ok(0) => return,
             Ok(n) => read_buf.extend_from_slice(&tmp[..n]),
             Err(_) => return,
@@ -792,12 +856,10 @@ async fn read_frames(
 async fn dispatch_frame(inner: &ConnectionInner, frame: Frame) {
     match &frame {
         Frame::Heartbeat => {
-            let _ = inner
-                .writer_tx
-                .lock()
-                .await
-                .send(WriterCommand::SendFrame(Frame::Heartbeat))
-                .await;
+            // Nothing to do: the socket read timeout in read_frames
+            // already tracks peer liveness. Each side sends heartbeats
+            // on its own timer, so we never echo them back.
+            tracing::trace!("heartbeat received");
         }
         Frame::Method(0, method) => match method.as_ref() {
             Method::ConnectionClose(_args) => {
@@ -827,7 +889,6 @@ async fn dispatch_frame(inner: &ConnectionInner, frame: Frame) {
         Frame::Method(channel_id, _)
         | Frame::Header(channel_id, _)
         | Frame::Body(channel_id, _) => {
-            inner.last_activity.store(now_millis(), Ordering::Relaxed);
             let channels = inner.channels.lock().await;
             if let Some(slot) = channels.get(channel_id) {
                 let _ = slot.rpc_tx.send(frame);
@@ -836,19 +897,24 @@ async fn dispatch_frame(inner: &ConnectionInner, frame: Frame) {
     }
 }
 
-async fn heartbeat_loop(inner: Arc<ConnectionInner>, interval_secs: u64) {
-    let half = Duration::from_secs(interval_secs / 2);
+async fn heartbeat_loop(inner: Arc<ConnectionInner>, interval_secs: u64, generation: u64) {
+    let half = Duration::from_millis(interval_secs * 1000 / 2);
     loop {
         tokio::time::sleep(half).await;
 
         if !inner.is_open.load(Ordering::Acquire) {
             break;
         }
+        // Exit if a newer heartbeat loop has been spawned (after recovery)
+        if inner.connection_recovery_epoch.load(Ordering::Relaxed) != generation {
+            break;
+        }
 
-        // Heartbeat only if idle
-        let last = inner.last_activity.load(Ordering::Relaxed);
-        let elapsed = now_millis().saturating_sub(last);
-        if elapsed >= (half.as_millis() as u64) {
+        // Only send a heartbeat when the connection has been idle
+        // (no writes for at least half the heartbeat interval).
+        let last = inner.last_sent_activity.load(Ordering::Relaxed);
+        let elapsed = monotonic_millis().saturating_sub(last);
+        if elapsed >= half.as_millis() as u64 {
             let _ = inner
                 .writer_tx
                 .lock()
@@ -856,13 +922,13 @@ async fn heartbeat_loop(inner: Arc<ConnectionInner>, interval_secs: u64) {
                 .send(WriterCommand::SendFrame(Frame::Heartbeat))
                 .await;
         }
-        inner.last_activity.store(now_millis(), Ordering::Relaxed);
     }
 }
 
-fn now_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
+/// Monotonic milliseconds since process start. Immune to wall-clock
+/// adjustments (NTP, leap seconds, manual changes).
+fn monotonic_millis() -> u64 {
+    static BASE: OnceLock<Instant> = OnceLock::new();
+    let base = BASE.get_or_init(Instant::now);
+    base.elapsed().as_millis() as u64
 }
