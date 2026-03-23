@@ -2,14 +2,14 @@
 
 bunny-rs is a RabbitMQ client for Rust built on Tokio and async/await.
 Its API follows [Bunny](https://github.com/ruby-amqp/bunny) (Ruby) and borrows
-from the .NET, Java, and [Swift](https://github.com/michaelklishin/bunny-swift) clients.
+from the .NET, Java, and [Bunny Swift](https://github.com/michaelklishin/bunny-swift) clients.
 
 Key features:
 
  * Automatic [connection recovery](https://www.rabbitmq.com/client-libraries/java-api-guide#recovery) with topology replay
- * Streaming [publisher confirms](https://www.rabbitmq.com/docs/confirms) for [data safety](https://www.rabbitmq.com/docs/publishers#data-safety)
+ * Streaming [publisher confirms](https://www.rabbitmq.com/docs/confirms) with response tracking for [data safety](https://www.rabbitmq.com/docs/publishers#data-safety)
  * Type-safe builders for [quorum queues](https://www.rabbitmq.com/docs/quorum-queues), [streams](https://www.rabbitmq.com/docs/streams), delayed queues, JMS queues ([Tanzu RabbitMQ](https://docs.vmware.com/en/VMware-RabbitMQ/index.html)), dead-lettering, TTL, and more
- * TLS with [rustls](https://github.com/rustls/rustls) (no OpenSSL dependency)
+ * TLS 1.2 and 1.3 support with [`rustls`](https://github.com/rustls/rustls)
  * Forward-compatible with RabbitMQ 4.3+ ([deprecated features](https://www.rabbitmq.com/docs/deprecated-features) are not exposed)
 
 
@@ -20,7 +20,8 @@ Rust 1.94 or later.
 
 ## Supported RabbitMQ Versions
 
-[Currently supported RabbitMQ release series](https://www.rabbitmq.com/release-information).
+This client primarily all [supported RabbitMQ release series](https://www.rabbitmq.com/release-information)
+but all key operations should work with older series, including RabbitMQ `3.13.x`.
 
 
 ## Project Maturity
