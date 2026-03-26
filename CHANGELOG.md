@@ -2,7 +2,15 @@
 
 ## v0.10.0 (in development)
 
-(no changes yet)
+### Enhancements
+
+ * `channel::Channel` [acknowledgement](https://rabbitmq.com/docs/confirms) helpers: `ack`, `ack_multiple`, `reject`, `discard`, `nack_multiple`
+   for the common single-delivery and batch cases
+
+ * `PublishOptions::mandatory` is a new helper constructor with a [self-describing name](https://www.rabbitmq.com/docs/publishers#unroutable)
+
+ * Adopt Trusted Publishing (OIDC) for publishing to `crates.io`
+
 
 
 ## v0.9.0 (Mar 26, 2026)
