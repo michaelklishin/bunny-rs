@@ -569,6 +569,17 @@ pub struct PublishOptions {
     pub properties: BasicProperties,
 }
 
+impl PublishOptions {
+    /// Mandatory publish: the broker will return the message if it
+    /// cannot be routed to any queue or stream.
+    pub fn mandatory() -> Self {
+        Self {
+            mandatory: true,
+            ..Default::default()
+        }
+    }
+}
+
 //
 // Headers exchange binding arguments
 //

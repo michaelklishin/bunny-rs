@@ -1042,6 +1042,32 @@ impl Channel {
     // Acknowledgements
     //
 
+    /// Acknowledge a single delivery.
+    pub async fn ack(&self, delivery_tag: u64) -> Result<(), ConnectionError> {
+        self.basic_ack(delivery_tag, false).await
+    }
+
+    /// Acknowledge all deliveries up to and including `delivery_tag`.
+    pub async fn ack_multiple(&self, delivery_tag: u64) -> Result<(), ConnectionError> {
+        self.basic_ack(delivery_tag, true).await
+    }
+
+    /// Negatively acknowledge all deliveries up to and including `delivery_tag`
+    /// and requeue them.
+    pub async fn nack_multiple(&self, delivery_tag: u64) -> Result<(), ConnectionError> {
+        self.basic_nack(delivery_tag, true, true).await
+    }
+
+    /// Reject a single delivery and requeue it.
+    pub async fn reject(&self, delivery_tag: u64) -> Result<(), ConnectionError> {
+        self.basic_reject(delivery_tag, true).await
+    }
+
+    /// Reject a single delivery and discard (dead-letter) it.
+    pub async fn discard(&self, delivery_tag: u64) -> Result<(), ConnectionError> {
+        self.basic_reject(delivery_tag, false).await
+    }
+
     pub async fn basic_ack(
         &self,
         delivery_tag: u64,
