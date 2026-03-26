@@ -1,6 +1,11 @@
 # Change Log
 
-## v0.9.0 (in development)
+## v0.10.0 (in development)
+
+(no changes yet)
+
+
+## v0.9.0 (Mar 26, 2026)
 
 Initial public release.
 
