@@ -10,6 +10,8 @@ use nom::number::complete::{be_u8, be_u16, be_u32, be_u64};
 use crate::errors::{NomError, ProtocolError};
 use crate::protocol::constants::*;
 use crate::protocol::method::{Method, parse_method, serialize_method};
+use crate::protocol::properties::{BasicProperties, serialize_basic_properties};
+use crate::protocol::types::serialize_short_string;
 
 /// Pre-encode method + header + body frames into a single `Bytes` buffer.
 pub fn serialize_publish_frames(
@@ -59,6 +61,67 @@ pub fn serialize_publish_frames(
     }
 
     Ok(Bytes::from(buf))
+}
+
+/// Encode a publish directly into the caller's buffer, bypassing Method enum
+/// construction and intermediate allocations.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_publish_direct(
+    buf: &mut Vec<u8>,
+    channel_id: u16,
+    exchange: &str,
+    routing_key: &str,
+    mandatory: bool,
+    properties: &BasicProperties,
+    body: &[u8],
+    max_body_per_frame: usize,
+) -> Result<(), ProtocolError> {
+    // Method frame: basic.publish
+    buf.push(FRAME_METHOD);
+    buf.extend_from_slice(&channel_id.to_be_bytes());
+    let size_pos = buf.len();
+    buf.extend_from_slice(&0u32.to_be_bytes());
+    // class=60, method=40
+    buf.extend_from_slice(&CLASS_BASIC.to_be_bytes());
+    buf.extend_from_slice(&40u16.to_be_bytes());
+    buf.extend_from_slice(&0u16.to_be_bytes()); // ticket
+    serialize_short_string(exchange, buf)?;
+    serialize_short_string(routing_key, buf)?;
+    buf.push(if mandatory { 1 } else { 0 });
+    let payload_size = (buf.len() - size_pos - 4) as u32;
+    buf[size_pos..size_pos + 4].copy_from_slice(&payload_size.to_be_bytes());
+    buf.push(FRAME_END);
+
+    // Header frame: content header with properties written inline
+    buf.push(FRAME_HEADER);
+    buf.extend_from_slice(&channel_id.to_be_bytes());
+    let size_pos = buf.len();
+    buf.extend_from_slice(&0u32.to_be_bytes());
+    buf.extend_from_slice(&CLASS_BASIC.to_be_bytes());
+    buf.extend_from_slice(&0u16.to_be_bytes()); // weight
+    buf.extend_from_slice(&(body.len() as u64).to_be_bytes());
+    serialize_basic_properties(properties, buf)?;
+    let payload_size = (buf.len() - size_pos - 4) as u32;
+    buf[size_pos..size_pos + 4].copy_from_slice(&payload_size.to_be_bytes());
+    buf.push(FRAME_END);
+
+    // Body frame(s)
+    if !body.is_empty() {
+        let chunk_size = if max_body_per_frame == 0 {
+            body.len()
+        } else {
+            max_body_per_frame
+        };
+        for chunk in body.chunks(chunk_size) {
+            buf.push(FRAME_BODY);
+            buf.extend_from_slice(&channel_id.to_be_bytes());
+            buf.extend_from_slice(&(chunk.len() as u32).to_be_bytes());
+            buf.extend_from_slice(chunk);
+            buf.push(FRAME_END);
+        }
+    }
+
+    Ok(())
 }
 
 type NomResult<'a, T> = IResult<&'a [u8], T, NomError>;

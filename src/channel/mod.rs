@@ -21,11 +21,9 @@ use crate::options::{
     QueueDeclareOptions, QueueDeleteOptions, QueueType,
 };
 use crate::protocol::constants::*;
-use crate::protocol::frame::{ContentHeader, Frame, serialize_publish_frames};
+use crate::protocol::frame::{ContentHeader, Frame, encode_publish_direct};
 use crate::protocol::method::*;
-use crate::protocol::properties::{
-    BasicProperties, parse_basic_properties, serialize_basic_properties,
-};
+use crate::protocol::properties::{BasicProperties, parse_basic_properties};
 use crate::protocol::types::FieldTable;
 use crate::queue::Queue;
 
@@ -183,7 +181,6 @@ pub struct Channel {
     inner: Arc<Mutex<ChannelInner>>,
     topology: Arc<Mutex<TopologyRegistry>>,
     rpc_rx: mpsc::UnboundedReceiver<Method>,
-    // Per-consumer delivery receivers
     delivery_rxs: HashMap<CompactString, mpsc::UnboundedReceiver<RawDelivery>>,
     event_tx: broadcast::Sender<ChannelEvent>,
     return_rx: mpsc::UnboundedReceiver<ReturnedMessage>,
@@ -738,49 +735,47 @@ impl Channel {
         body: impl AsRef<[u8]>,
     ) -> Result<Option<PublishConfirm>, ConnectionError> {
         let body = body.as_ref();
-        let channel_id = self.id;
 
-        // Pre-encode all frames into a single buffer.
-        let raw = {
-            let method = Method::BasicPublish(Box::new(BasicPublishArgs {
-                exchange: exchange.into(),
-                routing_key: routing_key.into(),
-                mandatory: opts.mandatory,
-                immediate: false,
-            }));
-
-            let mut props_buf = Vec::new();
-            serialize_basic_properties(&opts.properties, &mut props_buf)
-                .map_err(ConnectionError::Protocol)?;
-
-            let max_body = if self.frame_max == 0 {
-                body.len()
-            } else {
-                (self.frame_max as usize).saturating_sub(FRAME_OVERHEAD)
-            };
-
-            serialize_publish_frames(channel_id, &method, &props_buf, body, max_body)
-                .map_err(ConnectionError::Protocol)?
+        let max_body = if self.frame_max == 0 {
+            body.len()
+        } else {
+            (self.frame_max as usize).saturating_sub(FRAME_OVERHEAD)
         };
 
-        // Acquire backpressure permit (if any) without holding ChannelInner lock
-        let permit = {
-            let inner = self.inner.lock().await;
-            inner.confirm_semaphore.clone()
-        };
-        let permit = match permit {
-            Some(sem) => Some(
-                sem.acquire_owned()
-                    .await
-                    .map_err(|_| ConnectionError::ChannelNotOpen)?,
-            ),
-            None => None,
-        };
+        // Encode directly: avoid intermediary allocations on the hot path.
+        let estimate = 128 + body.len() + FRAME_OVERHEAD * 3;
+        let mut buf = Vec::with_capacity(estimate);
+        encode_publish_direct(
+            &mut buf,
+            self.id,
+            exchange,
+            routing_key,
+            opts.mandatory,
+            &opts.properties,
+            body,
+            max_body,
+        )
+        .map_err(ConnectionError::Protocol)?;
 
-        // Register confirm before send
+        let raw = Bytes::from(buf);
+
+        // Fast path: skip both mutex locks when confirms are not enabled.
         let confirm = {
             let mut inner = self.inner.lock().await;
             if inner.confirms_enabled {
+                let permit = match inner.confirm_semaphore.clone() {
+                    Some(sem) => {
+                        // Must release lock before the potentially-blocking acquire.
+                        drop(inner);
+                        let permit = sem
+                            .acquire_owned()
+                            .await
+                            .map_err(|_| ConnectionError::ChannelNotOpen)?;
+                        inner = self.inner.lock().await;
+                        Some(permit)
+                    }
+                    None => None,
+                };
                 let seq_no = inner.confirm_next_seq;
                 inner.confirm_next_seq += 1;
                 let (tx, rx) = oneshot::channel();
@@ -1386,27 +1381,34 @@ async fn dispatcher_loop(
                     ..
                 } = state
                 {
-                    accumulated.extend_from_slice(&data);
-                    if accumulated.len() as u64 >= body_size {
-                        // Content assembly complete
-                        if let ContentState::AwaitingBody {
+                    let is_single_frame = accumulated.is_empty() && data.len() as u64 >= body_size;
+                    if !is_single_frame {
+                        accumulated.extend_from_slice(&data);
+                    }
+                    if (is_single_frame || accumulated.len() as u64 >= body_size)
+                        && let ContentState::AwaitingBody {
                             info,
                             header,
                             accumulated,
                             ..
                         } = mem::replace(&mut state, ContentState::Idle)
-                        {
-                            let delivery = RawDelivery {
-                                consumer_tag: info.target.consumer_tag(),
-                                delivery_tag: info.delivery_tag,
-                                redelivered: info.redelivered,
-                                exchange: info.exchange,
-                                routing_key: info.routing_key,
-                                header,
-                                body: Bytes::from(accumulated),
-                            };
-                            dispatch_delivery(&inner, &info.target, delivery).await;
-                        }
+                    {
+                        // Zero-copy for single-frame bodies; assembled copy otherwise.
+                        let body = if is_single_frame {
+                            data
+                        } else {
+                            Bytes::from(accumulated)
+                        };
+                        let delivery = RawDelivery {
+                            consumer_tag: info.target.consumer_tag(),
+                            delivery_tag: info.delivery_tag,
+                            redelivered: info.redelivered,
+                            exchange: info.exchange,
+                            routing_key: info.routing_key,
+                            header,
+                            body,
+                        };
+                        dispatch_delivery(&inner, &info.target, delivery).await;
                     }
                 }
             }
