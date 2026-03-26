@@ -20,7 +20,7 @@ Rust 1.94 or later.
 
 ## Supported RabbitMQ Versions
 
-This client primarily all [supported RabbitMQ release series](https://www.rabbitmq.com/release-information)
+This client targets all [supported RabbitMQ release series](https://www.rabbitmq.com/release-information)
 but all key operations should work with older series, including RabbitMQ `3.13.x`.
 
 
@@ -34,7 +34,7 @@ Breaking API changes are possible.
 
 ```toml
 [dependencies]
-bunny-rs = "0.9"
+bunny-rs = "0.10"
 ```
 
 
@@ -68,14 +68,7 @@ Routes to the queue via the [default exchange](https://www.rabbitmq.com/tutorial
 ch.publish("", "queue-name", b"Hello!").await?;
 ```
 
-Via `amq.fanout` (a fanout exchange), which routes
-to all bound queues unconditionally:
-
-```rust
-ch.publish("amq.fanout", "", b"broadcast!").await?;
-```
-
-Via `amq.topic` (a topic exchange) with a routing key:
+Via a named exchange with a routing key:
 
 ```rust
 ch.publish("amq.topic", "orders.eu.new", b"{\"id\": 1}").await?;
@@ -93,6 +86,16 @@ let opts = PublishOptions {
     ..Default::default()
 };
 ch.basic_publish("", "queue-name", &opts, b"{\"order\": 123}").await?;
+```
+
+Mandatory publish (get unroutable messages back via `recv_return`):
+
+```rust
+ch.basic_publish("amq.direct", "no-such-queue", &PublishOptions::mandatory(), b"hello").await?;
+
+if let Some(returned) = ch.recv_return().await {
+    println!("returned: {} {}", returned.reply_code, returned.reply_text);
+}
 ```
 
 ### Publisher Confirms (Data Safety)
@@ -131,18 +134,27 @@ let c = confirm_ch.publish("", "orders", &PublishOptions::default(), b"order-1")
 c.wait().await?;
 ```
 
-### Consuming with Manual Acknowledgements
+**Backpressure**: block publishes when too many confirms are outstanding:
 
 ```rust
+let mut confirm_ch = ch.into_confirm_mode_with_tracking(1000).await?;
+```
+
+### Consuming
+
+With manual acknowledgements:
+
+```rust
+ch.basic_qos(250).await?;
 ch.consume_with_manual_acks("my-queue", "my-consumer").await?;
 
 while let Some(delivery) = ch.recv_delivery().await? {
     println!("{:?}", delivery.body_str().unwrap_or("<binary>"));
-    ch.basic_ack(delivery.delivery_tag, false).await?;
+    ch.ack(delivery.delivery_tag).await?;
 }
 ```
 
-### Consuming with Automatic Acknowledgements
+With automatic acknowledgements:
 
 ```rust
 ch.consume_with_auto_acks("my-queue", "my-consumer").await?;
@@ -151,6 +163,44 @@ while let Some(delivery) = ch.recv_delivery().await? {
     println!("{:?}", delivery.body_str().unwrap_or("<binary>"));
 }
 ```
+
+Using the `Consumer` trait (runs in a background task):
+
+```rust
+use bunny_rs::{Consumer, Delivery, ConnectionError, ConsumeOptions};
+
+struct MyConsumer;
+
+impl Consumer for MyConsumer {
+    async fn handle_delivery(&mut self, delivery: Delivery) -> Result<(), ConnectionError> {
+        println!("{:?}", delivery.body_str());
+        Ok(())
+    }
+}
+
+let handle = ch.basic_consume_with("my-queue", "", ConsumeOptions::default(), MyConsumer).await?;
+// ...later:
+handle.cancel();
+```
+
+### Acknowledgement Helpers
+
+```rust
+// Acknowledge a single delivery
+ch.ack(delivery.delivery_tag).await?;
+// Acknowledge all deliveries up to and including this tag
+ch.ack_multiple(delivery.delivery_tag).await?;
+
+// Reject and requeue
+ch.reject(delivery.delivery_tag).await?;
+// Reject and discard (dead-letter if configured)
+ch.discard(delivery.delivery_tag).await?;
+// Negatively acknowledge and requeue multiple deliveries
+ch.nack_multiple(delivery.delivery_tag).await?;
+```
+
+`basic_ack`, `basic_nack`, and `basic_reject` are available when you need
+full control over the `multiple` and `requeue` flags.
 
 ### Multiple Consumers per Channel
 
@@ -161,6 +211,91 @@ let tag_a = ch.consume_with_manual_acks("queue-1", "consumer-a").await?;
 let tag_b = ch.consume_with_manual_acks("queue-2", "consumer-b").await?;
 
 let delivery = ch.recv_delivery_for(&tag_a).await?;
+```
+
+### Declaring Queues
+
+```rust
+// Classic durable
+ch.durable_queue("events").await?;
+// Replicated quorum
+ch.quorum_queue("orders").await?;
+// Append-only stream
+ch.stream_queue("logs").await?;
+// Tanzu RabbitMQ delayed
+ch.delayed_queue("retry-tasks", Default::default()).await?;
+// Tanzu RabbitMQ JMS
+ch.jms_queue("jms-tasks", Default::default()).await?;
+// Server-named, exclusive, auto-delete
+let q = ch.temporary_queue().await?;
+```
+
+With full options:
+
+```rust
+use std::time::Duration;
+use bunny_rs::QueueDeclareOptions;
+
+ch.queue_declare("with-ttl", QueueDeclareOptions::durable()
+    .message_ttl(Duration::from_secs(3600))
+    .max_length(100_000)
+    .dead_letter_exchange("dlx")
+).await?;
+```
+
+### Declaring Exchanges
+
+```rust
+ch.declare_fanout("logs").await?;
+ch.declare_direct("direct_logs").await?;
+ch.declare_topic("topic_logs").await?;
+ch.declare_headers("match_logs").await?;
+```
+
+With options:
+
+```rust
+use bunny_rs::ExchangeDeclareOptions;
+
+ch.exchange_declare("durable-logs", "fanout", ExchangeDeclareOptions::durable()).await?;
+```
+
+### Bindings
+
+```rust
+ch.bind("my-queue", "logs", "routing.key").await?;
+```
+
+With arguments (e.g. for headers exchanges):
+
+```rust
+use bunny_rs::options::{BindingArguments, HeadersMatch};
+
+let args = BindingArguments::new()
+    .match_mode(HeadersMatch::All)
+    .header("region", "eu")
+    .header("priority", 1);
+ch.queue_bind("my-queue", "headers-x", "", args).await?;
+```
+
+Exchange-to-exchange:
+
+```rust
+use bunny_rs::FieldTable;
+
+ch.exchange_bind("destination", "source", "events.#", FieldTable::new()).await?;
+```
+
+### Transactions
+
+```rust
+let mut tx = ch.into_tx_mode().await?;
+
+tx.publish("", "queue-name", b"msg-1").await?;
+tx.publish("", "queue-name", b"msg-2").await?;
+tx.commit().await?;
+
+// or: tx.rollback().await?;
 ```
 
 ### Connecting to Multiple Nodes
@@ -202,8 +337,6 @@ Enabled by default. On connection loss (network failure, server restart,
 heartbeat timeout), the library reconnects with exponential backoff and
 replays topology: exchanges, queues, bindings, and consumers are re-declared.
 
-This is the [standard recovery procedure](https://www.rabbitmq.com/client-libraries/java-api-guide#recovery) used by the Java, .NET, Ruby, and Swift clients.
-
 ```rust
 let mut events = conn.events();
 tokio::spawn(async move {
@@ -213,111 +346,150 @@ tokio::spawn(async move {
 });
 ```
 
-### Declaring Queues
-
-```rust
-ch.durable_queue("events").await?;          // classic durable
-ch.quorum_queue("orders").await?;           // replicated quorum
-ch.stream_queue("logs").await?;             // append-only stream
-ch.delayed_queue("retry-tasks", Default::default()).await?;  // Tanzu RabbitMQ delayed
-ch.jms_queue("jms-tasks", Default::default()).await?;        // Tanzu RabbitMQ JMS
-let q = ch.temporary_queue().await?;        // server-named, exclusive, auto-delete
-```
-
-With full options:
+Configure recovery intervals and limits:
 
 ```rust
 use std::time::Duration;
-use bunny_rs::QueueDeclareOptions;
+use bunny_rs::{ConnectionOptions, RecoveryConfig};
 
-ch.queue_declare("with-ttl", QueueDeclareOptions::durable()
-    .message_ttl(Duration::from_secs(3600))
-    .max_length(100_000)
-    .dead_letter_exchange("dlx")
-).await?;
+let opts = ConnectionOptions {
+    recovery: RecoveryConfig {
+        initial_interval: Duration::from_secs(2),
+        max_interval: Duration::from_secs(30),
+        max_attempts: Some(10),
+        ..Default::default()
+    },
+    ..Default::default()
+};
 ```
 
-### Declaring Exchanges
+### Connection Blocked Notifications
+
+RabbitMQ [blocks publishing connections](https://www.rabbitmq.com/docs/connections#blocked)
+when it runs low on resources. The client tracks this automatically:
 
 ```rust
-ch.declare_fanout("logs").await?;
-ch.declare_direct("direct_logs").await?;
-ch.declare_topic("topic_logs").await?;
-ch.declare_headers("match_logs").await?;
+if conn.is_blocked().await {
+    println!("blocked: {:?}", conn.blocked_reason().await);
+}
 ```
 
-With options:
-
-```rust
-use bunny_rs::ExchangeDeclareOptions;
-
-ch.exchange_declare("durable-logs", "fanout", ExchangeDeclareOptions::durable()).await?;
-```
-
-### Prefetch (QoS)
-
-```rust
-ch.basic_qos(250).await?;
-```
-
-### Bindings
-
-```rust
-ch.bind("my-queue", "logs", "routing.key").await?;
-```
-
-With arguments:
-
-```rust
-use bunny_rs::FieldTable;
-
-ch.queue_bind("my-queue", "headers-x", "", FieldTable::new()).await?;
-```
-
-Exchange-to-exchange:
-
-```rust
-ch.exchange_bind("destination", "source", "events.#", FieldTable::new()).await?;
-```
+Blocked/unblocked transitions are also emitted as `ConnectionEvent::Blocked`
+and `ConnectionEvent::Unblocked` via `conn.events()`.
 
 ### Delivery Metadata
 
 ```rust
-delivery.body_str()        // Option<&str>
-delivery.content_type()    // Option<&str>
-delivery.message_id()      // Option<&str>
-delivery.correlation_id()  // Option<&str>
-delivery.reply_to()        // Option<&str>
+delivery.body_str()
+delivery.content_type()
+delivery.message_id()
+delivery.correlation_id()
+delivery.reply_to()
 
 let props = delivery.properties();
-props.get_timestamp()      // Option<u64>
-props.get_headers()        // Option<&FieldTable>
+props.get_timestamp()
+props.get_headers()
 ```
 
-### Type-Safe Queue Arguments
+All accessors return `Option`; properties are parsed lazily on first access.
+
+### Queue Types and Arguments
+
+Every queue type can be selected via a helper (`quorum()`, `stream()`, etc.)
+or explicitly with the `QueueType` enum:
+
+```rust
+use bunny_rs::{QueueDeclareOptions, QueueType};
+
+// These are equivalent:
+QueueDeclareOptions::quorum()
+QueueDeclareOptions::default().queue_type(QueueType::Quorum)
+```
+
+**Quorum queues** (replicated, durable):
 
 ```rust
 use bunny_rs::QueueDeclareOptions;
-use bunny_rs::options::{OverflowMode, DeadLetterStrategy, MaxAge};
+use bunny_rs::options::{DeadLetterStrategy, QueueLeaderLocator};
 
-// Quorum queue with delivery limits and dead-lettering
 ch.queue_declare("tasks", QueueDeclareOptions::quorum()
     .delivery_limit(5)
     .dead_letter_exchange("dlx")
     .dead_letter_strategy(DeadLetterStrategy::AtLeastOnce)
+    .quorum_initial_group_size(3)
+    .leader_locator(QueueLeaderLocator::Balanced)
+    .single_active_consumer()
 ).await?;
+```
 
-// Stream with 7-day retention
+**Streams** (append-only log):
+
+```rust
+use bunny_rs::QueueDeclareOptions;
+use bunny_rs::options::MaxAge;
+
 ch.queue_declare("events", QueueDeclareOptions::stream()
     .max_age(MaxAge::days(7))
+    .max_length_bytes(1_000_000_000)
+    .stream_max_segment_size_bytes(100_000_000)
     .initial_cluster_size(3)
 ).await?;
+```
 
-// Bounded queue with overflow policy
+**Classic queues** with common arguments:
+
+```rust
+use std::time::Duration;
+use bunny_rs::QueueDeclareOptions;
+use bunny_rs::options::OverflowMode;
+
 ch.queue_declare("bounded", QueueDeclareOptions::durable()
-    .max_length(10_000)
+    .message_ttl(Duration::from_secs(3600))
+    .expires(Duration::from_secs(86400))
+    .max_length(100_000)
+    .max_length_bytes(50_000_000)
     .overflow(OverflowMode::RejectPublish)
+    .dead_letter_exchange("dlx")
+    .dead_letter_routing_key("rejected")
+    .max_priority(10)
 ).await?;
+```
+
+For arguments not covered by a builder method, use the escape hatch:
+
+```rust
+ch.queue_declare("custom", QueueDeclareOptions::durable()
+    .with_argument("x-custom-plugin-arg", 42)
+).await?;
+```
+
+### Consuming from Streams
+
+```rust
+use bunny_rs::ConsumeOptions;
+use bunny_rs::options::StreamOffset;
+
+ch.basic_consume("my-stream", "my-consumer",
+    ConsumeOptions::default()
+        .stream_offset(StreamOffset::First)
+).await?;
+```
+
+Other offset types:
+
+```rust
+use bunny_rs::options::{StreamOffset, MaxAge};
+
+// Most recent available
+StreamOffset::Last
+// Only new messages
+StreamOffset::Next
+// Absolute log offset
+StreamOffset::Offset(1000)
+// POSIX timestamp (seconds)
+StreamOffset::Timestamp(1719792000)
+// Relative time
+StreamOffset::Interval(MaxAge::hours(2))
 ```
 
 ### Tanzu RabbitMQ: Delayed Queues
@@ -361,6 +533,14 @@ ch.basic_consume("jms-orders", "my-consumer",
 
 ### TLS
 
+AMQPS URI (uses platform-native certificate verification):
+
+```rust
+let conn = Connection::from_uri("amqps://rabbit.example.com:5671/").await?;
+```
+
+Custom CA:
+
 ```rust
 use std::path::Path;
 use bunny_rs::{Connection, ConnectionOptions};
@@ -387,12 +567,6 @@ let tls = TlsOptions::mutual(
 )?;
 ```
 
-AMQPS URI:
-
-```rust
-let conn = Connection::from_uri("amqps://rabbit.example.com:5671/").await?;
-```
-
 
 ## Documentation
 
@@ -412,7 +586,7 @@ let conn = Connection::from_uri("amqps://rabbit.example.com:5671/").await?;
 
 ## Community and Getting Help
 
- * [GitHub Discussions](https://github.com/rabbitmq/bunny-rs/discussions)
+ * [GitHub Discussions](https://github.com/michaelklishin/bunny-rs/discussions)
  * [RabbitMQ Discord](https://rabbitmq.com/discord)
  * [RabbitMQ Mailing List](https://groups.google.com/forum/#!forum/rabbitmq-users)
 
