@@ -3,9 +3,9 @@
 // See LICENSE-APACHE and LICENSE-MIT in the repository root for details.
 
 use crate::test_helpers::connect;
+use bunny_rs::RecoveryConfig;
 use bunny_rs::connection::{Connection, ConnectionOptions};
 use bunny_rs::protocol::types::FieldTable;
-use bunny_rs::RecoveryConfig;
 
 #[tokio::test]
 async fn test_connect_and_close() {

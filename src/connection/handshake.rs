@@ -8,7 +8,7 @@ use bytes::BytesMut;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::codec::{Decoder, Encoder};
 
-use crate::connection::{ConnectionError, ConnectionOptions};
+use crate::connection::{AuthMechanism, ConnectionError, ConnectionOptions};
 use crate::protocol::codec::AmqpCodec;
 use crate::protocol::frame::Frame;
 use crate::protocol::method::*;
@@ -37,7 +37,7 @@ pub(crate) async fn perform(
     };
     let server_properties = start_args.server_properties.clone();
 
-    // connection.start-ok (PLAIN)
+    // connection.start-ok
     let mut client_properties = FieldTable::new();
     client_properties.insert("product", "bunny-rs");
     client_properties.insert("version", env!("CARGO_PKG_VERSION"));
@@ -81,13 +81,12 @@ pub(crate) async fn perform(
         }
     }
 
-    use crate::connection::AuthMechanism;
-
     let response = match opts.auth_mechanism {
         AuthMechanism::External => Vec::new(),
         _ => {
             // PLAIN: \0username\0password
-            let mut buf = Vec::new();
+            let mut buf =
+                Vec::with_capacity(2 + opts.username.len() + opts.password.as_str().len());
             buf.push(0);
             buf.extend_from_slice(opts.username.as_bytes());
             buf.push(0);

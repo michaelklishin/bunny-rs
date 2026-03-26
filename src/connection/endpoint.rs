@@ -24,10 +24,6 @@ impl Endpoint {
     pub fn from_host(host: impl Into<String>) -> Self {
         Self::new(host, 5672)
     }
-
-    pub(crate) fn addr_string(&self) -> String {
-        self.to_string()
-    }
 }
 
 impl fmt::Display for Endpoint {
@@ -79,7 +75,7 @@ impl AddressResolver {
 /// Resolves a hostname to all its IP addresses via `tokio::net::lookup_host`.
 /// Falls back to the original endpoint if DNS resolution fails.
 async fn dns_resolve(ep: &Endpoint) -> Vec<Endpoint> {
-    match tokio::net::lookup_host(ep.addr_string()).await {
+    match tokio::net::lookup_host(ep.to_string()).await {
         Ok(addrs) => {
             let resolved: Vec<Endpoint> = addrs
                 .map(|addr: SocketAddr| Endpoint::new(addr.ip().to_string(), addr.port()))

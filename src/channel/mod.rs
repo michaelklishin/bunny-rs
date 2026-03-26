@@ -15,6 +15,7 @@ use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, broadcast, mpsc, onesh
 use crate::connection::topology::TopologyRegistry;
 use crate::connection::{ConnectionError, WriterCommand, WriterTx};
 use crate::consumer::{Consumer, ConsumerHandle};
+use crate::exchange::Exchange;
 use crate::options::{
     ConsumeOptions, ExchangeDeclareOptions, ExchangeDeleteOptions, PublishOptions,
     QueueDeclareOptions, QueueDeleteOptions, QueueType,
@@ -22,8 +23,11 @@ use crate::options::{
 use crate::protocol::constants::*;
 use crate::protocol::frame::{ContentHeader, Frame, serialize_publish_frames};
 use crate::protocol::method::*;
-use crate::protocol::properties::{BasicProperties, serialize_basic_properties};
+use crate::protocol::properties::{
+    BasicProperties, parse_basic_properties, serialize_basic_properties,
+};
 use crate::protocol::types::FieldTable;
+use crate::queue::Queue;
 
 /// Consumer tag.
 pub type ConsumerTag = CompactString;
@@ -311,6 +315,11 @@ impl Channel {
     // Exchange operations
     //
 
+    /// Handle to the default (nameless) exchange.
+    pub fn default_exchange(&mut self) -> Exchange<'_> {
+        Exchange::new(self, "".into())
+    }
+
     pub async fn exchange_declare(
         &mut self,
         name: &str,
@@ -444,6 +453,11 @@ impl Channel {
     // Queue operations
     //
 
+    /// Handle to a named queue, delegating operations to this channel.
+    pub fn queue(&mut self, name: &str) -> Queue<'_> {
+        Queue::new(self, name.into())
+    }
+
     pub async fn queue_declare(
         &mut self,
         name: &str,
@@ -543,7 +557,13 @@ impl Channel {
             arguments: arguments.into(),
         }));
         match self.rpc(method).await? {
-            Method::QueueUnbindOk => Ok(()),
+            Method::QueueUnbindOk => {
+                self.topology
+                    .lock()
+                    .await
+                    .remove_queue_binding(queue, exchange, routing_key);
+                Ok(())
+            }
             _ => Err(ConnectionError::UnexpectedMethod),
         }
     }
@@ -892,7 +912,7 @@ impl Channel {
         let tag = self.basic_consume(queue, consumer_tag, opts).await?;
         consumer.handle_consume_ok(&tag);
 
-        let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
+        let (cancel_tx, mut cancel_rx) = oneshot::channel();
         let mut delivery_rx = self
             .delivery_rxs
             .remove(&tag)
@@ -1352,8 +1372,8 @@ async fn dispatcher_loop(
                             header,
                             body_size,
                             accumulated: Vec::with_capacity(
-                            usize::try_from(body_size).unwrap_or(usize::MAX),
-                        ),
+                                usize::try_from(body_size).unwrap_or(usize::MAX),
+                            ),
                         };
                     }
                 }
@@ -1459,7 +1479,7 @@ fn parse_properties_raw(raw: &Bytes) -> BasicProperties {
     if raw.is_empty() {
         BasicProperties::default()
     } else {
-        crate::protocol::properties::parse_basic_properties(raw)
+        parse_basic_properties(raw)
             .map(|(_, p)| p)
             .unwrap_or_default()
     }
@@ -1486,6 +1506,18 @@ pub struct QueueInfo {
     pub name: String,
     pub message_count: u32,
     pub consumer_count: u32,
+}
+
+impl QueueInfo {
+    #[must_use]
+    pub fn message_count(&self) -> u32 {
+        self.message_count
+    }
+
+    #[must_use]
+    pub fn consumer_count(&self) -> u32 {
+        self.consumer_count
+    }
 }
 
 /// A delivered message. Properties parsed lazily.

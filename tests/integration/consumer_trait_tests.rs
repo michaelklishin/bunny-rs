@@ -6,10 +6,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::test_helpers::connect;
+use bunny_rs::Delivery;
 use bunny_rs::connection::ConnectionError;
 use bunny_rs::consumer::Consumer;
 use bunny_rs::options::{ConsumeOptions, PublishOptions, QueueDeclareOptions, QueueDeleteOptions};
-use bunny_rs::Delivery;
 
 struct CountingConsumer {
     count: Arc<AtomicU64>,
@@ -29,7 +29,10 @@ async fn test_basic_consume_with_trait() {
     let mut con_ch = conn.open_channel().await.unwrap();
 
     pub_ch
-        .queue_declare("bunny-rs.test.consumer-trait", QueueDeclareOptions::default())
+        .queue_declare(
+            "bunny-rs.test.consumer-trait",
+            QueueDeclareOptions::default(),
+        )
         .await
         .unwrap();
     con_ch.basic_qos(10).await.unwrap();
@@ -140,10 +143,7 @@ async fn test_consumer_handle_drop_cancels() {
     assert_eq!(count.load(Ordering::Acquire), 0);
 
     pub_ch
-        .queue_delete(
-            "bunny-rs.test.consumer-drop",
-            QueueDeleteOptions::default(),
-        )
+        .queue_delete("bunny-rs.test.consumer-drop", QueueDeleteOptions::default())
         .await
         .unwrap();
     pub_ch.close().await.unwrap();

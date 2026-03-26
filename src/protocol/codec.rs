@@ -8,6 +8,7 @@ use tokio_util::codec::{Decoder, Encoder};
 use crate::errors::ProtocolError;
 use crate::protocol::constants::*;
 use crate::protocol::frame::{ContentHeader, Frame, serialize_frame};
+use crate::protocol::method::parse_method;
 
 enum CodecState {
     AwaitingProtocolHeader,
@@ -114,7 +115,7 @@ impl Decoder for AmqpCodec {
                         let payload = &raw[7..7 + payload_size];
                         match frame_type {
                             FRAME_METHOD => {
-                                let (rest, method) = crate::protocol::method::parse_method(payload)
+                                let (rest, method) = parse_method(payload)
                                     .map_err(|e| ProtocolError::Parse(format!("{e:?}")))?;
                                 if !rest.is_empty() {
                                     return Err(ProtocolError::TrailingData { bytes: rest.len() });
@@ -122,21 +123,16 @@ impl Decoder for AmqpCodec {
                                 Ok(Some(Frame::Method(channel_id, Box::new(method))))
                             }
                             FRAME_HEADER => {
-                                let (payload, class_id) = nom::number::complete::be_u16::<
-                                    _,
-                                    nom::error::Error<&[u8]>,
-                                >(payload)
-                                .map_err(|e| ProtocolError::Parse(format!("{e:?}")))?;
-                                let (payload, _weight) = nom::number::complete::be_u16::<
-                                    _,
-                                    nom::error::Error<&[u8]>,
-                                >(payload)
-                                .map_err(|e| ProtocolError::Parse(format!("{e:?}")))?;
-                                let (_payload, body_size) =
-                                    nom::number::complete::be_u64::<_, nom::error::Error<&[u8]>>(
-                                        payload,
-                                    )
-                                    .map_err(|e| ProtocolError::Parse(format!("{e:?}")))?;
+                                // class_id(2) + weight(2) + body_size(8) = 12 bytes minimum
+                                if payload.len() < 12 {
+                                    return Err(ProtocolError::Parse(
+                                        "content header too short".into(),
+                                    ));
+                                }
+                                let class_id = u16::from_be_bytes([payload[0], payload[1]]);
+                                // payload[2..4] is weight, always 0
+                                let body_size =
+                                    u64::from_be_bytes(payload[4..12].try_into().unwrap());
 
                                 // Zero-copy properties
                                 let props_offset = 7 + 2 + 2 + 8; // frame header parsed before + class_id + weight + body_size

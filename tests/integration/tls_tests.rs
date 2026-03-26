@@ -21,8 +21,7 @@ mod tls {
             return PathBuf::from(dir);
         }
 
-        let manifest =
-            std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+        let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
         let in_repo = PathBuf::from(&manifest).join("tests/tls/certs");
         if in_repo.exists() {
             return in_repo;
@@ -143,12 +142,9 @@ mod tls {
         let mut ch = conn.open_channel().await.unwrap();
         ch.basic_qos(10).await.unwrap();
 
-        ch.queue_declare(
-            "bunny-rs.test.tls-pub-con",
-            QueueDeclareOptions::default(),
-        )
-        .await
-        .unwrap();
+        ch.queue_declare("bunny-rs.test.tls-pub-con", QueueDeclareOptions::default())
+            .await
+            .unwrap();
 
         ch.consume_with_manual_acks("bunny-rs.test.tls-pub-con", "")
             .await
@@ -163,14 +159,11 @@ mod tls {
         .await
         .unwrap();
 
-        let delivery = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            ch.recv_delivery(),
-        )
-        .await
-        .expect("timed out")
-        .unwrap()
-        .expect("no delivery");
+        let delivery = tokio::time::timeout(std::time::Duration::from_secs(5), ch.recv_delivery())
+            .await
+            .expect("timed out")
+            .unwrap()
+            .expect("no delivery");
 
         assert_eq!(&delivery.body[..], b"encrypted payload");
         ch.basic_ack(delivery.delivery_tag, false).await.unwrap();

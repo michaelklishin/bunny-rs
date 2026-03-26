@@ -7,8 +7,7 @@ use bunny_rs::connection::ConnectionEvent;
 use bunny_rs::options::PublishOptions;
 
 fn rabbitmqctl(args: &[&str]) -> bool {
-    let cmd =
-        std::env::var("BUNNY_RS_RABBITMQCTL").unwrap_or_else(|_| "rabbitmqctl".into());
+    let cmd = std::env::var("BUNNY_RS_RABBITMQCTL").unwrap_or_else(|_| "rabbitmqctl".into());
     std::process::Command::new(&cmd)
         .args(args)
         .current_dir(std::env::temp_dir())
@@ -41,7 +40,12 @@ async fn test_connection_blocked_unblocked() {
         let mut pub_ch = conn2.open_channel().await.unwrap();
         // This publish will block until the alarm clears
         let _ = pub_ch
-            .basic_publish("", "amq.rabbitmq.reply-to", &PublishOptions::default(), b"x")
+            .basic_publish(
+                "",
+                "amq.rabbitmq.reply-to",
+                &PublishOptions::default(),
+                b"x",
+            )
             .await;
     });
 

@@ -13,7 +13,10 @@ async fn test_stream_queue_declare() {
     let mut ch = conn.open_channel().await.unwrap();
 
     let info = ch
-        .queue_declare("bunny-rs.test.stream-declare", QueueDeclareOptions::stream())
+        .queue_declare(
+            "bunny-rs.test.stream-declare",
+            QueueDeclareOptions::stream(),
+        )
         .await
         .unwrap();
     assert_eq!(info.name, "bunny-rs.test.stream-declare");
@@ -99,12 +102,9 @@ async fn test_stream_consume_from_offset() {
     let conn = connect().await;
     let mut ch = conn.open_channel().await.unwrap();
 
-    ch.queue_declare(
-        "bunny-rs.test.stream-offset",
-        QueueDeclareOptions::stream(),
-    )
-    .await
-    .unwrap();
+    ch.queue_declare("bunny-rs.test.stream-offset", QueueDeclareOptions::stream())
+        .await
+        .unwrap();
 
     // Publish messages
     for i in 0..10u8 {
@@ -142,23 +142,17 @@ async fn test_stream_consume_from_offset() {
 
     // Should receive at least one delivery (either from the tail of the
     // existing log or the newly published message).
-    let delivery = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        con_ch.recv_delivery(),
-    )
-    .await
-    .expect("timed out waiting for stream delivery")
-    .unwrap()
-    .expect("no delivery");
+    let delivery = tokio::time::timeout(std::time::Duration::from_secs(5), con_ch.recv_delivery())
+        .await
+        .expect("timed out waiting for stream delivery")
+        .unwrap()
+        .expect("no delivery");
 
     assert!(!delivery.body.is_empty());
 
-    ch.queue_delete(
-        "bunny-rs.test.stream-offset",
-        QueueDeleteOptions::default(),
-    )
-    .await
-    .unwrap();
+    ch.queue_delete("bunny-rs.test.stream-offset", QueueDeleteOptions::default())
+        .await
+        .unwrap();
     ch.close().await.unwrap();
     con_ch.close().await.unwrap();
     conn.close().await.unwrap();

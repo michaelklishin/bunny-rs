@@ -2,10 +2,12 @@
 // Licensed under the Apache License 2.0 and MIT licenses.
 // See LICENSE-APACHE and LICENSE-MIT in the repository root for details.
 
+use std::fmt;
 use std::time::Duration;
 
 use compact_str::CompactString;
 
+use crate::protocol::properties::BasicProperties;
 use crate::protocol::types::{FieldTable, FieldValue};
 
 fn duration_to_millis_i64(d: Duration) -> i64 {
@@ -98,8 +100,8 @@ impl QueueType {
     }
 }
 
-impl std::fmt::Display for QueueType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for QueueType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
 }
@@ -395,8 +397,8 @@ impl ExchangeType {
     }
 }
 
-impl std::fmt::Display for ExchangeType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for ExchangeType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
 }
@@ -564,7 +566,7 @@ impl ConsumeOptions {
 #[derive(Debug, Clone, Default)]
 pub struct PublishOptions {
     pub mandatory: bool,
-    pub properties: crate::protocol::properties::BasicProperties,
+    pub properties: BasicProperties,
 }
 
 //

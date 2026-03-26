@@ -74,7 +74,10 @@ pub(crate) async fn attempt_recovery(
         match try_reconnect(opts, resolver).await {
             Ok(mut transport) => {
                 if !config.topology_recovery {
-                    tracing::info!(attempt, "connection recovery succeeded (topology replay skipped)");
+                    tracing::info!(
+                        attempt,
+                        "connection recovery succeeded (topology replay skipped)"
+                    );
                     return Some((transport, Vec::new()));
                 }
                 match replay_topology(&mut transport, opts, topology, event_tx).await {
@@ -149,7 +152,7 @@ async fn replay_topology(
     topology: &mut TopologyRegistry,
     event_tx: &broadcast::Sender<ConnectionEvent>,
 ) -> Result<Vec<ConnectionEvent>, BoxError> {
-    let mut buf = BytesMut::new();
+    let mut buf = BytesMut::with_capacity(256);
     let mut codec = AmqpCodec::new_framing(opts.frame_max);
     let mut read_buf = BytesMut::with_capacity(8192);
     let mut changes = Vec::new();

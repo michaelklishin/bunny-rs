@@ -3,6 +3,9 @@
 // See LICENSE-APACHE and LICENSE-MIT in the repository root for details.
 
 use bytes::Bytes;
+use nom::IResult;
+use nom::bytes::complete::take;
+use nom::number::complete::{be_u8, be_u16, be_u32, be_u64};
 
 use crate::errors::{NomError, ProtocolError};
 use crate::protocol::constants::*;
@@ -57,10 +60,6 @@ pub fn serialize_publish_frames(
 
     Ok(Bytes::from(buf))
 }
-
-use nom::IResult;
-use nom::bytes::complete::take;
-use nom::number::complete::{be_u8, be_u16, be_u32, be_u64};
 
 type NomResult<'a, T> = IResult<&'a [u8], T, NomError>;
 

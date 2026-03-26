@@ -19,7 +19,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(300))]
 
     #[test]
-    fn prop_endpoint_display_matches_addr_string(host in arb_host(), port in arb_port()) {
+    fn prop_endpoint_display_format(host in arb_host(), port in arb_port()) {
         let ep = Endpoint::new(host.clone(), port);
         let display = format!("{ep}");
         prop_assert_eq!(display, format!("{host}:{port}"));

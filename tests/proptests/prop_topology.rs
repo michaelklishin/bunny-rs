@@ -193,4 +193,106 @@ proptest! {
         prop_assert_eq!(reg.queue_bindings.len(), 1);
         prop_assert_eq!(reg.queue_bindings[0].queue.as_str(), q2.as_str());
     }
+
+    #[test]
+    fn prop_update_queue_name_propagates(
+        old_name in arb_name(),
+        new_name in arb_name(),
+        exchange in arb_name(),
+        tag in arb_name(),
+    ) {
+        prop_assume!(old_name != new_name);
+
+        let mut reg = TopologyRegistry::default();
+        reg.record_queue(&old_name, &QueueDeclareOptions::default(), true);
+        reg.record_queue_binding(&old_name, &exchange, "rk", &FieldTable::new());
+        reg.record_consumer(1, &old_name, &tag, &ConsumeOptions::default());
+
+        reg.update_queue_name(&old_name, &new_name);
+
+        prop_assert_eq!(reg.queues[0].name.as_str(), new_name.as_str());
+        prop_assert_eq!(reg.queue_bindings[0].queue.as_str(), new_name.as_str());
+        prop_assert_eq!(reg.consumers[0].queue.as_str(), new_name.as_str());
+    }
+
+    #[test]
+    fn prop_update_consumer_tag_propagates(
+        old_tag in arb_name(),
+        new_tag in arb_name(),
+    ) {
+        prop_assume!(old_tag != new_tag);
+
+        let mut reg = TopologyRegistry::default();
+        reg.record_consumer(1, "q", &old_tag, &ConsumeOptions::default());
+
+        reg.update_consumer_tag(&old_tag, &new_tag);
+
+        prop_assert_eq!(reg.consumers[0].consumer_tag.as_str(), new_tag.as_str());
+    }
+
+    #[test]
+    fn prop_record_queue_binding_is_idempotent(
+        queue in arb_name(),
+        exchange in arb_name(),
+        rk in arb_name(),
+    ) {
+        let mut reg = TopologyRegistry::default();
+        let args = FieldTable::new();
+        reg.record_queue_binding(&queue, &exchange, &rk, &args);
+        reg.record_queue_binding(&queue, &exchange, &rk, &args);
+        prop_assert_eq!(reg.queue_bindings.len(), 1, "duplicate queue binding recorded");
+    }
+
+    #[test]
+    fn prop_record_exchange_binding_is_idempotent(
+        dest in arb_name(),
+        src in arb_name(),
+        rk in arb_name(),
+    ) {
+        let mut reg = TopologyRegistry::default();
+        let args = FieldTable::new();
+        reg.record_exchange_binding(&dest, &src, &rk, &args);
+        reg.record_exchange_binding(&dest, &src, &rk, &args);
+        prop_assert_eq!(reg.exchange_bindings.len(), 1, "duplicate exchange binding recorded");
+    }
+
+    #[test]
+    fn prop_remove_queue_binding_is_precise(
+        queue in arb_name(),
+        exchange in arb_name(),
+        rk1 in arb_name(),
+        rk2 in arb_name(),
+    ) {
+        prop_assume!(rk1 != rk2);
+
+        let mut reg = TopologyRegistry::default();
+        let args = FieldTable::new();
+        reg.record_queue_binding(&queue, &exchange, &rk1, &args);
+        reg.record_queue_binding(&queue, &exchange, &rk2, &args);
+
+        reg.remove_queue_binding(&queue, &exchange, &rk1);
+
+        prop_assert_eq!(reg.queue_bindings.len(), 1);
+        prop_assert_eq!(reg.queue_bindings[0].routing_key.as_str(), rk2.as_str());
+    }
+
+    #[test]
+    fn prop_remove_exchange_binding_is_precise(
+        dest in arb_name(),
+        src in arb_name(),
+        rk1 in arb_name(),
+        rk2 in arb_name(),
+    ) {
+        prop_assume!(rk1 != rk2);
+
+        let mut reg = TopologyRegistry::default();
+        let args = FieldTable::new();
+        reg.record_exchange_binding(&dest, &src, &rk1, &args);
+        reg.record_exchange_binding(&dest, &src, &rk2, &args);
+
+        reg.remove_exchange_binding(&dest, &src, &rk1);
+
+        prop_assert_eq!(reg.exchange_bindings.len(), 1);
+        prop_assert_eq!(reg.exchange_bindings[0].routing_key.as_str(), rk2.as_str());
+    }
 }

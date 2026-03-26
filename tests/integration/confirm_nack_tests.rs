@@ -45,17 +45,17 @@ async fn test_confirm_pending_drained_on_close() {
     // before close, or nacked by the drain). None should hang forever.
     for c in confirms {
         let result = tokio::time::timeout(std::time::Duration::from_secs(2), c.wait()).await;
-        assert!(result.is_ok(), "confirm should not hang after channel close");
+        assert!(
+            result.is_ok(),
+            "confirm should not hang after channel close"
+        );
         // The result is either Ok (broker acked before close) or
         // Err(PublishNacked) from the drain — both are acceptable.
     }
 
     let mut cleanup = conn.open_channel().await.unwrap();
     cleanup
-        .queue_delete(
-            "bunny-rs.test.confirm-drain",
-            QueueDeleteOptions::default(),
-        )
+        .queue_delete("bunny-rs.test.confirm-drain", QueueDeleteOptions::default())
         .await
         .unwrap();
     conn.close().await.unwrap();
@@ -83,8 +83,7 @@ async fn test_publish_to_nonexistent_exchange_with_confirm() {
         Ok(Some(c)) => {
             // The confirm should resolve (likely with an error since
             // the broker closes the channel).
-            let result =
-                tokio::time::timeout(std::time::Duration::from_secs(5), c.wait()).await;
+            let result = tokio::time::timeout(std::time::Duration::from_secs(5), c.wait()).await;
             assert!(result.is_ok(), "confirm should resolve, not hang");
             // It's expected to be a nack/error since the channel was closed
             match result.unwrap() {

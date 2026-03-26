@@ -16,7 +16,6 @@ pub struct Queue<'a> {
 }
 
 impl<'a> Queue<'a> {
-    #[allow(dead_code)]
     pub(crate) fn new(ch: &'a mut Channel, name: CompactString) -> Self {
         Self { channel: ch, name }
     }

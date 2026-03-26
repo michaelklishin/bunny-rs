@@ -3,8 +3,8 @@
 // See LICENSE-APACHE and LICENSE-MIT in the repository root for details.
 
 use crate::test_helpers::connect;
-use bunny_rs::options::{PublishOptions, QueueDeclareOptions, QueueDeleteOptions};
 use bunny_rs::ChannelEvent;
+use bunny_rs::options::{PublishOptions, QueueDeclareOptions, QueueDeleteOptions};
 
 /// Soft error: declaring a queue with incompatible flags triggers PRECONDITION_FAILED
 /// which closes the channel but not the connection.
@@ -98,12 +98,9 @@ async fn test_channel_isolation() {
     let mut ch2 = conn.open_channel().await.unwrap();
     let mut ch3 = conn.open_channel().await.unwrap();
 
-    ch1.queue_declare(
-        "bunny-rs.test.ch-isolation",
-        QueueDeclareOptions::default(),
-    )
-    .await
-    .unwrap();
+    ch1.queue_declare("bunny-rs.test.ch-isolation", QueueDeclareOptions::default())
+        .await
+        .unwrap();
 
     // Kill ch2 with a bad declare
     let _ = ch2

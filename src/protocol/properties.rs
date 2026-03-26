@@ -4,7 +4,7 @@
 
 use compact_str::CompactString;
 
-use crate::errors::NomError;
+use crate::errors::{NomError, ProtocolError};
 use crate::protocol::types::{
     FieldTable, parse_field_table, parse_short_string, serialize_field_table,
     serialize_short_string,
@@ -237,7 +237,7 @@ pub fn parse_basic_properties(input: &[u8]) -> NomResult<'_, BasicProperties> {
 pub fn serialize_basic_properties(
     props: &BasicProperties,
     buf: &mut Vec<u8>,
-) -> Result<(), crate::errors::ProtocolError> {
+) -> Result<(), ProtocolError> {
     let mut flags: u16 = 0;
 
     if props.content_type.is_some() {

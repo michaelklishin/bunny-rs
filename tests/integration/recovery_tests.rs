@@ -30,12 +30,9 @@ async fn test_connection_recovery_after_force_close() {
 
     // Declare a queue so topology has something to replay
     let mut ch = conn.open_channel().await.unwrap();
-    ch.queue_declare(
-        "bunny-rs.test.recovery-q",
-        QueueDeclareOptions::default(),
-    )
-    .await
-    .unwrap();
+    ch.queue_declare("bunny-rs.test.recovery-q", QueueDeclareOptions::default())
+        .await
+        .unwrap();
 
     // Force close from broker
     let closed = force_close_connections();

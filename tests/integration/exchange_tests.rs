@@ -313,9 +313,12 @@ async fn test_alternate_exchange() {
         .await
         .unwrap();
 
-    ch.exchange_delete("bunny-rs.test.alt-primary", ExchangeDeleteOptions::default())
-        .await
-        .unwrap();
+    ch.exchange_delete(
+        "bunny-rs.test.alt-primary",
+        ExchangeDeleteOptions::default(),
+    )
+    .await
+    .unwrap();
     ch.exchange_delete("bunny-rs.test.alt-ae", ExchangeDeleteOptions::default())
         .await
         .unwrap();

@@ -31,7 +31,7 @@ pub trait Consumer: Send + 'static {
 /// Handle for cancelling a `basic_consume_with` consumer.
 pub struct ConsumerHandle {
     consumer_tag: CompactString,
-    cancel_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    cancel_tx: Option<oneshot::Sender<()>>,
     channel_id: u16,
     writer_tx: WriterTx,
 }

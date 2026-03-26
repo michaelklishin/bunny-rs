@@ -12,22 +12,23 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, broadcast, mpsc};
-use tokio_util::codec::{Decoder, Encoder};
+use tokio_util::codec::Decoder;
 
+use crate::channel::Channel;
 use crate::credentials::Password;
 use crate::errors::ProtocolError;
 use crate::protocol::codec::AmqpCodec;
 use crate::protocol::constants::*;
-use crate::protocol::frame::Frame;
-use crate::protocol::method::Method;
+use crate::protocol::frame::{Frame, serialize_frame};
+use crate::protocol::method::{ConnectionCloseArgs, ConnectionUpdateSecretArgs, Method};
 use crate::protocol::types::FieldTable;
 use crate::transport::Transport;
 
@@ -401,7 +402,7 @@ impl Connection {
         ep: &endpoint::Endpoint,
         #[allow(unused_variables)] opts: &ConnectionOptions,
     ) -> Result<Transport, ConnectionError> {
-        let tcp = TcpStream::connect(ep.addr_string()).await?;
+        let tcp = TcpStream::connect(ep.to_string()).await?;
         tcp.set_nodelay(true)?;
 
         #[cfg(feature = "tls")]
@@ -459,7 +460,11 @@ impl Connection {
         tokio::spawn(async move {
             writer_loop(writer, writer_rx, &writer_inner).await;
             // Skip if recovery has already established a newer connection.
-            if writer_inner.connection_recovery_epoch.load(Ordering::Relaxed) == generation {
+            if writer_inner
+                .connection_recovery_epoch
+                .load(Ordering::Relaxed)
+                == generation
+            {
                 writer_inner.is_open.store(false, Ordering::Release);
             }
         });
@@ -524,7 +529,7 @@ impl Connection {
         *self.inner.recovery_filter.lock().await = Some(filter);
     }
 
-    pub async fn open_channel(&self) -> Result<crate::channel::Channel, ConnectionError> {
+    pub async fn open_channel(&self) -> Result<Channel, ConnectionError> {
         if !self.is_open() {
             return Err(ConnectionError::NotConnected);
         }
@@ -580,7 +585,7 @@ impl Connection {
         }
 
         let writer_tx = self.inner.writer_tx.lock().await.clone();
-        Ok(crate::channel::Channel::new(
+        Ok(Channel::new(
             channel_id,
             writer_tx,
             rpc_rx,
@@ -601,7 +606,7 @@ impl Connection {
         let frame = Frame::Method(
             0,
             Box::new(Method::ConnectionUpdateSecret(Box::new(
-                crate::protocol::method::ConnectionUpdateSecretArgs {
+                ConnectionUpdateSecretArgs {
                     secret: secret.as_bytes().to_vec(),
                     reason: reason.into(),
                 },
@@ -626,14 +631,12 @@ impl Connection {
 
         let close_frame = Frame::Method(
             0,
-            Box::new(Method::ConnectionClose(Box::new(
-                crate::protocol::method::ConnectionCloseArgs {
-                    reply_code: 200,
-                    reply_text: "Normal shutdown".into(),
-                    class_id: 0,
-                    method_id: 0,
-                },
-            ))),
+            Box::new(Method::ConnectionClose(Box::new(ConnectionCloseArgs {
+                reply_code: 200,
+                reply_text: "Normal shutdown".into(),
+                class_id: 0,
+                method_id: 0,
+            }))),
         );
 
         let _ = self
@@ -659,14 +662,12 @@ impl Drop for Connection {
         }
         let close_frame = Frame::Method(
             0,
-            Box::new(Method::ConnectionClose(Box::new(
-                crate::protocol::method::ConnectionCloseArgs {
-                    reply_code: 200,
-                    reply_text: "Normal shutdown".into(),
-                    class_id: 0,
-                    method_id: 0,
-                },
-            ))),
+            Box::new(Method::ConnectionClose(Box::new(ConnectionCloseArgs {
+                reply_code: 200,
+                reply_text: "Normal shutdown".into(),
+                class_id: 0,
+                method_id: 0,
+            }))),
         );
         if let Ok(writer_tx) = self.inner.writer_tx.try_lock() {
             let _ = writer_tx.try_send(WriterCommand::SendFrame(close_frame));
@@ -680,18 +681,18 @@ async fn writer_loop(
     inner: &ConnectionInner,
 ) {
     let mut buf = BytesMut::with_capacity(64 * 1024);
-    let mut codec = AmqpCodec::new_framing(DEFAULT_FRAME_MAX);
+    let mut encode_scratch = Vec::with_capacity(256);
 
     loop {
         let Some(cmd) = rx.recv().await else { break };
-        encode_command(&cmd, &mut codec, &mut buf);
+        encode_command(&cmd, &mut encode_scratch, &mut buf);
 
         // Coalesce queued writes
         let mut batch_count = 1usize;
         while batch_count < 256 {
             match rx.try_recv() {
                 Ok(cmd) => {
-                    encode_command(&cmd, &mut codec, &mut buf);
+                    encode_command(&cmd, &mut encode_scratch, &mut buf);
                     batch_count += 1;
                 }
                 Err(_) => break,
@@ -711,10 +712,12 @@ async fn writer_loop(
     }
 }
 
-fn encode_command(cmd: &WriterCommand, codec: &mut AmqpCodec, buf: &mut BytesMut) {
+fn encode_command(cmd: &WriterCommand, encode_scratch: &mut Vec<u8>, buf: &mut BytesMut) {
     match cmd {
         WriterCommand::SendFrame(frame) => {
-            let _ = codec.encode(frame.clone(), buf);
+            encode_scratch.clear();
+            let _ = serialize_frame(frame, encode_scratch);
+            buf.extend_from_slice(encode_scratch);
         }
         WriterCommand::SendRaw(raw) => {
             buf.extend_from_slice(raw);
@@ -756,59 +759,7 @@ async fn reader_loop_impl(
     tracing::info!("connection lost, starting recovery");
     let _ = inner.event_tx.send(ConnectionEvent::RecoveryStarted);
     // Snapshot topology under lock
-    let mut topology_snapshot = {
-        let topo = inner.topology.lock().await;
-        topology::TopologyRegistry {
-            exchanges: topo
-                .exchanges
-                .iter()
-                .map(|e| topology::RecordedExchange {
-                    name: e.name.clone(),
-                    kind: e.kind.clone(),
-                    opts: e.opts.clone(),
-                })
-                .collect(),
-            queues: topo
-                .queues
-                .iter()
-                .map(|q| topology::RecordedQueue {
-                    name: q.name.clone(),
-                    opts: q.opts.clone(),
-                    server_named: q.server_named,
-                })
-                .collect(),
-            queue_bindings: topo
-                .queue_bindings
-                .iter()
-                .map(|b| topology::RecordedQueueBinding {
-                    queue: b.queue.clone(),
-                    exchange: b.exchange.clone(),
-                    routing_key: b.routing_key.clone(),
-                    arguments: b.arguments.clone(),
-                })
-                .collect(),
-            exchange_bindings: topo
-                .exchange_bindings
-                .iter()
-                .map(|b| topology::RecordedExchangeBinding {
-                    destination: b.destination.clone(),
-                    source: b.source.clone(),
-                    routing_key: b.routing_key.clone(),
-                    arguments: b.arguments.clone(),
-                })
-                .collect(),
-            consumers: topo
-                .consumers
-                .iter()
-                .map(|c| topology::RecordedConsumer {
-                    channel_id: c.channel_id,
-                    queue: c.queue.clone(),
-                    consumer_tag: c.consumer_tag.clone(),
-                    opts: c.opts.clone(),
-                })
-                .collect(),
-        }
-    };
+    let mut topology_snapshot = inner.topology.lock().await.clone();
     // Apply recovery filter to snapshot
     {
         let filter_guard = inner.recovery_filter.lock().await;
@@ -865,7 +816,10 @@ async fn reader_loop_impl(
             let (new_writer_tx, new_writer_rx) = mpsc::channel::<WriterCommand>(128);
 
             // Advance the epoch so loops from the old connection notice and exit.
-            let generation = inner.connection_recovery_epoch.fetch_add(1, Ordering::Relaxed) + 1;
+            let generation = inner
+                .connection_recovery_epoch
+                .fetch_add(1, Ordering::Relaxed)
+                + 1;
 
             // Swap writer and reset activity tracking for the fresh connection
             *inner.writer_tx.lock().await = new_writer_tx;
@@ -877,13 +831,17 @@ async fn reader_loop_impl(
             let writer_inner = inner.clone();
             tokio::spawn(async move {
                 writer_loop(new_writer, new_writer_rx, &writer_inner).await;
-                if writer_inner.connection_recovery_epoch.load(Ordering::Relaxed) == generation {
+                if writer_inner
+                    .connection_recovery_epoch
+                    .load(Ordering::Relaxed)
+                    == generation
+                {
                     writer_inner.is_open.store(false, Ordering::Release);
                 }
             });
+            let frame_max = inner.negotiated_frame_max;
             let inner2 = inner.clone();
-            let frame_max = inner2.negotiated_frame_max;
-            tokio::spawn(Box::pin(async move {
+            tokio::spawn(async move {
                 reader_loop(
                     new_reader,
                     BytesMut::with_capacity(8192),
@@ -892,7 +850,7 @@ async fn reader_loop_impl(
                     generation,
                 )
                 .await;
-            }));
+            });
 
             // Restart heartbeat loop for the recovered connection
             if inner.negotiated_heartbeat > 0 {

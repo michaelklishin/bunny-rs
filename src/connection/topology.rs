@@ -8,7 +8,7 @@ use crate::options::{ConsumeOptions, ExchangeDeclareOptions, QueueDeclareOptions
 use crate::protocol::types::FieldTable;
 
 /// Recorded topology for automatic recovery.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct TopologyRegistry {
     pub exchanges: Vec<RecordedExchange>,
     pub queues: Vec<RecordedQueue>,
@@ -17,18 +17,21 @@ pub struct TopologyRegistry {
     pub consumers: Vec<RecordedConsumer>,
 }
 
+#[derive(Clone)]
 pub struct RecordedExchange {
     pub name: CompactString,
     pub kind: CompactString,
     pub opts: ExchangeDeclareOptions,
 }
 
+#[derive(Clone)]
 pub struct RecordedQueue {
     pub name: CompactString,
     pub opts: QueueDeclareOptions,
     pub server_named: bool,
 }
 
+#[derive(Clone)]
 pub struct RecordedQueueBinding {
     pub queue: CompactString,
     pub exchange: CompactString,
@@ -36,6 +39,7 @@ pub struct RecordedQueueBinding {
     pub arguments: FieldTable,
 }
 
+#[derive(Clone)]
 pub struct RecordedExchangeBinding {
     pub destination: CompactString,
     pub source: CompactString,
@@ -43,6 +47,7 @@ pub struct RecordedExchangeBinding {
     pub arguments: FieldTable,
 }
 
+#[derive(Clone)]
 pub struct RecordedConsumer {
     pub channel_id: u16,
     pub queue: CompactString,
@@ -80,6 +85,9 @@ impl TopologyRegistry {
         routing_key: &str,
         arguments: &FieldTable,
     ) {
+        self.queue_bindings.retain(|b| {
+            !(b.queue == queue && b.exchange == exchange && b.routing_key == routing_key)
+        });
         self.queue_bindings.push(RecordedQueueBinding {
             queue: queue.into(),
             exchange: exchange.into(),
@@ -95,6 +103,9 @@ impl TopologyRegistry {
         routing_key: &str,
         arguments: &FieldTable,
     ) {
+        self.exchange_bindings.retain(|b| {
+            !(b.destination == destination && b.source == source && b.routing_key == routing_key)
+        });
         self.exchange_bindings.push(RecordedExchangeBinding {
             destination: destination.into(),
             source: source.into(),
@@ -129,6 +140,12 @@ impl TopologyRegistry {
         self.queue_bindings.retain(|b| b.exchange != name);
         self.exchange_bindings
             .retain(|b| b.source != name && b.destination != name);
+    }
+
+    pub fn remove_queue_binding(&mut self, queue: &str, exchange: &str, routing_key: &str) {
+        self.queue_bindings.retain(|b| {
+            !(b.queue == queue && b.exchange == exchange && b.routing_key == routing_key)
+        });
     }
 
     pub fn remove_exchange_binding(&mut self, destination: &str, source: &str, routing_key: &str) {

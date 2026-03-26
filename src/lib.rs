@@ -28,10 +28,12 @@ pub use connection::{
     TopologyRecoveryFilter,
 };
 pub use consumer::{Consumer, ConsumerHandle};
+pub use exchange::Exchange;
 pub use options::{
     ConsumeOptions, ExchangeDeclareOptions, ExchangeDeleteOptions, ExchangeType, PublishOptions,
     QueueDeclareOptions, QueueDeleteOptions, QueueType,
 };
 pub use protocol::properties::{BasicProperties, DeliveryMode};
 pub use protocol::types::{FieldTable, FieldValue};
+pub use queue::Queue;
 pub use tx_channel::TxChannel;
