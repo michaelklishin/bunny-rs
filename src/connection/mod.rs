@@ -5,7 +5,7 @@
 pub mod endpoint;
 mod handshake;
 pub use handshake::negotiate_heartbeat;
-pub(crate) mod recovery;
+pub mod recovery;
 pub mod topology;
 
 use std::collections::HashMap;
@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, broadcast, mpsc};
@@ -30,6 +30,48 @@ use crate::protocol::frame::Frame;
 use crate::protocol::method::Method;
 use crate::protocol::types::FieldTable;
 use crate::transport::Transport;
+
+/// SASL authentication mechanism.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum AuthMechanism {
+    /// Username/password (`\0user\0pass`).
+    #[default]
+    Plain,
+    /// x509 client certificate (TLS required).
+    External,
+    /// Plugin-provided mechanism.
+    Custom(String),
+}
+
+impl AuthMechanism {
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Plain => "PLAIN",
+            Self::External => "EXTERNAL",
+            Self::Custom(s) => s,
+        }
+    }
+}
+
+impl From<&str> for AuthMechanism {
+    fn from(s: &str) -> Self {
+        match s {
+            "PLAIN" => Self::Plain,
+            "EXTERNAL" => Self::External,
+            other => Self::Custom(other.to_string()),
+        }
+    }
+}
+
+impl From<String> for AuthMechanism {
+    fn from(s: String) -> Self {
+        match s.as_str() {
+            "PLAIN" => Self::Plain,
+            "EXTERNAL" => Self::External,
+            _ => Self::Custom(s),
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct ConnectionOptions {
@@ -46,6 +88,12 @@ pub struct ConnectionOptions {
     pub channel_max: u16,
     pub frame_max: u32,
     pub connection_name: Option<String>,
+    pub auth_mechanism: AuthMechanism,
+    /// Custom client properties merged into the default ones during the
+    /// AMQP handshake. User-provided values take precedence, except for
+    /// `capabilities` which is merged at the table level.
+    pub client_properties: Option<FieldTable>,
+    pub recovery: recovery::RecoveryConfig,
     #[cfg(feature = "tls")]
     pub tls: Option<crate::transport::tls::TlsOptions>,
 }
@@ -63,6 +111,9 @@ impl Default for ConnectionOptions {
             channel_max: DEFAULT_CHANNEL_MAX,
             frame_max: DEFAULT_FRAME_MAX,
             connection_name: None,
+            auth_mechanism: AuthMechanism::Plain,
+            client_properties: None,
+            recovery: recovery::RecoveryConfig::default(),
             #[cfg(feature = "tls")]
             tls: None,
         }
@@ -243,7 +294,8 @@ pub(crate) type WriterTx = mpsc::Sender<WriterCommand>;
 
 pub(crate) enum WriterCommand {
     SendFrame(Frame),
-    SendFrames(Vec<Frame>),
+    /// Pre-encoded bytes ready for the wire.
+    SendRaw(Bytes),
 }
 
 /// Lifecycle events emitted by a [`Connection`].
@@ -381,6 +433,7 @@ impl Connection {
         let (reader, writer) = tokio::io::split(transport);
         let (writer_tx, writer_rx) = mpsc::channel::<WriterCommand>(128);
 
+        let recovery_config = opts.recovery.clone();
         let inner = Arc::new(ConnectionInner {
             is_open: AtomicBool::new(true),
             writer_tx: Mutex::new(writer_tx.clone()),
@@ -394,7 +447,7 @@ impl Connection {
             topology: Arc::new(Mutex::new(topology::TopologyRegistry::default())),
             opts,
             resolver,
-            recovery_config: recovery::RecoveryConfig::default(),
+            recovery_config,
             recovery_filter: Mutex::new(None),
             event_tx: broadcast::channel(16).0,
             last_sent_activity: AtomicU64::new(monotonic_millis()),
@@ -536,6 +589,36 @@ impl Connection {
         ))
     }
 
+    /// Send `connection.update-secret` to the broker (e.g. after an OAuth 2 token refresh).
+    ///
+    /// The server responds with `connection.update-secret-ok` which is handled
+    /// by the reader loop.
+    pub async fn update_secret(&self, secret: &str, reason: &str) -> Result<(), ConnectionError> {
+        if !self.is_open() {
+            return Err(ConnectionError::NotConnected);
+        }
+
+        let frame = Frame::Method(
+            0,
+            Box::new(Method::ConnectionUpdateSecret(Box::new(
+                crate::protocol::method::ConnectionUpdateSecretArgs {
+                    secret: secret.as_bytes().to_vec(),
+                    reason: reason.into(),
+                },
+            ))),
+        );
+
+        self.inner
+            .writer_tx
+            .lock()
+            .await
+            .send(WriterCommand::SendFrame(frame))
+            .await
+            .map_err(|_| ConnectionError::NotConnected)?;
+
+        Ok(())
+    }
+
     pub async fn close(&self) -> Result<(), ConnectionError> {
         if !self.is_open() {
             return Ok(());
@@ -563,6 +646,31 @@ impl Connection {
 
         self.inner.is_open.store(false, Ordering::Release);
         Ok(())
+    }
+}
+
+impl Drop for Connection {
+    fn drop(&mut self) {
+        if Arc::strong_count(&self.inner) > 1 {
+            return;
+        }
+        if !self.inner.is_open.swap(false, Ordering::AcqRel) {
+            return;
+        }
+        let close_frame = Frame::Method(
+            0,
+            Box::new(Method::ConnectionClose(Box::new(
+                crate::protocol::method::ConnectionCloseArgs {
+                    reply_code: 200,
+                    reply_text: "Normal shutdown".into(),
+                    class_id: 0,
+                    method_id: 0,
+                },
+            ))),
+        );
+        if let Ok(writer_tx) = self.inner.writer_tx.try_lock() {
+            let _ = writer_tx.try_send(WriterCommand::SendFrame(close_frame));
+        }
     }
 }
 
@@ -608,10 +716,8 @@ fn encode_command(cmd: &WriterCommand, codec: &mut AmqpCodec, buf: &mut BytesMut
         WriterCommand::SendFrame(frame) => {
             let _ = codec.encode(frame.clone(), buf);
         }
-        WriterCommand::SendFrames(frames) => {
-            for frame in frames {
-                let _ = codec.encode(frame.clone(), buf);
-            }
+        WriterCommand::SendRaw(raw) => {
+            buf.extend_from_slice(raw);
         }
     }
 }
@@ -883,6 +989,9 @@ async fn dispatch_frame(inner: &ConnectionInner, frame: Frame) {
             Method::ConnectionUnblocked => {
                 *inner.blocked_reason.lock().await = None;
                 let _ = inner.event_tx.send(ConnectionEvent::Unblocked);
+            }
+            Method::ConnectionUpdateSecretOk => {
+                tracing::debug!("connection.update-secret-ok received");
             }
             _ => {}
         },

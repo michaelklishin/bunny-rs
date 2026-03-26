@@ -20,7 +20,7 @@ use crate::options::{
     QueueDeclareOptions, QueueDeleteOptions, QueueType,
 };
 use crate::protocol::constants::*;
-use crate::protocol::frame::{ContentHeader, Frame};
+use crate::protocol::frame::{ContentHeader, Frame, serialize_publish_frames};
 use crate::protocol::method::*;
 use crate::protocol::properties::{BasicProperties, serialize_basic_properties};
 use crate::protocol::types::FieldTable;
@@ -59,6 +59,7 @@ pub enum AmqpReplyCode {
 }
 
 impl AmqpReplyCode {
+    #[must_use]
     pub fn from_code(code: u16) -> Option<Self> {
         match code {
             200 => Some(Self::Success),
@@ -85,6 +86,7 @@ impl AmqpReplyCode {
     }
 
     /// Soft errors close the channel but not the connection.
+    #[must_use]
     pub fn is_soft_error(self) -> bool {
         matches!(
             self,
@@ -99,6 +101,7 @@ impl AmqpReplyCode {
     }
 
     /// Hard errors close the connection.
+    #[must_use]
     pub fn is_hard_error(self) -> bool {
         !self.is_soft_error() && self != Self::Success
     }
@@ -121,6 +124,7 @@ pub enum ChannelEvent {
 
 impl ChannelEvent {
     /// Parsed reply code, if recognized.
+    #[must_use]
     pub fn amqp_reply_code(&self) -> Option<AmqpReplyCode> {
         match self {
             Self::Closed { code, .. } => AmqpReplyCode::from_code(*code),
@@ -129,6 +133,7 @@ impl ChannelEvent {
     }
 
     /// True if the close is a soft (channel-level) error.
+    #[must_use]
     pub fn is_soft_error(&self) -> bool {
         self.amqp_reply_code().is_some_and(|c| c.is_soft_error())
     }
@@ -178,6 +183,8 @@ pub struct Channel {
     delivery_rxs: HashMap<CompactString, mpsc::UnboundedReceiver<RawDelivery>>,
     event_tx: broadcast::Sender<ChannelEvent>,
     return_rx: mpsc::UnboundedReceiver<ReturnedMessage>,
+    /// Set to `true` after an explicit `close()` call.
+    explicitly_closed: bool,
 }
 
 struct RawDelivery {
@@ -254,6 +261,7 @@ impl Channel {
             delivery_rxs: HashMap::new(),
             event_tx,
             return_rx,
+            explicitly_closed: false,
         }
     }
 
@@ -662,12 +670,24 @@ impl Channel {
     // QoS
     //
 
-    /// Set per-consumer prefetch.
+    /// Set per-consumer prefetch (`global: false`).
     pub async fn basic_qos(&mut self, prefetch_count: u16) -> Result<(), ConnectionError> {
+        self.basic_qos_global(prefetch_count, false).await
+    }
+
+    /// Set prefetch with explicit `global` flag.
+    ///
+    /// When `global` is `false`, the limit applies per new consumer on this channel.
+    /// When `global` is `true`, the limit is shared across all consumers on this channel.
+    pub async fn basic_qos_global(
+        &mut self,
+        prefetch_count: u16,
+        global: bool,
+    ) -> Result<(), ConnectionError> {
         let method = Method::BasicQos(Box::new(BasicQosArgs {
             prefetch_size: 0,
             prefetch_count,
-            global: false,
+            global,
         }));
         match self.rpc(method).await? {
             Method::BasicQosOk => Ok(()),
@@ -698,45 +718,30 @@ impl Channel {
         body: impl AsRef<[u8]>,
     ) -> Result<Option<PublishConfirm>, ConnectionError> {
         let body = body.as_ref();
-        let method_frame = Frame::Method(
-            self.id,
-            Box::new(Method::BasicPublish(Box::new(BasicPublishArgs {
+        let channel_id = self.id;
+
+        // Pre-encode all frames into a single buffer.
+        let raw = {
+            let method = Method::BasicPublish(Box::new(BasicPublishArgs {
                 exchange: exchange.into(),
                 routing_key: routing_key.into(),
                 mandatory: opts.mandatory,
                 immediate: false,
-            }))),
-        );
+            }));
 
-        let mut props_buf = Vec::new();
-        serialize_basic_properties(&opts.properties, &mut props_buf)
-            .map_err(ConnectionError::Protocol)?;
+            let mut props_buf = Vec::new();
+            serialize_basic_properties(&opts.properties, &mut props_buf)
+                .map_err(ConnectionError::Protocol)?;
 
-        let header_frame = Frame::Header(
-            self.id,
-            ContentHeader {
-                class_id: CLASS_BASIC,
-                body_size: body.len() as u64,
-                properties_raw: Bytes::from(props_buf),
-            },
-        );
-
-        let max_body = if self.frame_max == 0 {
-            body.len()
-        } else {
-            (self.frame_max as usize).saturating_sub(FRAME_OVERHEAD)
-        };
-
-        let mut frames = vec![method_frame, header_frame];
-        if !body.is_empty() {
-            if max_body == 0 || body.len() <= max_body {
-                frames.push(Frame::Body(self.id, Bytes::copy_from_slice(body)));
+            let max_body = if self.frame_max == 0 {
+                body.len()
             } else {
-                for chunk in body.chunks(max_body) {
-                    frames.push(Frame::Body(self.id, Bytes::copy_from_slice(chunk)));
-                }
-            }
-        }
+                (self.frame_max as usize).saturating_sub(FRAME_OVERHEAD)
+            };
+
+            serialize_publish_frames(channel_id, &method, &props_buf, body, max_body)
+                .map_err(ConnectionError::Protocol)?
+        };
 
         // Acquire backpressure permit (if any) without holding ChannelInner lock
         let permit = {
@@ -767,7 +772,7 @@ impl Channel {
         };
 
         self.writer_tx
-            .send(WriterCommand::SendFrames(frames))
+            .send(WriterCommand::SendRaw(raw))
             .await
             .map_err(|_| ConnectionError::NotConnected)?;
 
@@ -913,7 +918,12 @@ impl Channel {
             }
         });
 
-        Ok(ConsumerHandle::new(tag_clone, cancel_tx))
+        Ok(ConsumerHandle::new(
+            tag_clone,
+            cancel_tx,
+            self.id,
+            self.writer_tx.clone(),
+        ))
     }
 
     /// Polls a queue for a single message. Returns `None` if empty.
@@ -1115,6 +1125,17 @@ impl Channel {
     //
 
     pub async fn close(&mut self) -> Result<(), ConnectionError> {
+        self.explicitly_closed = true;
+
+        // Drain pending confirms so publishers get a clean PublishNacked
+        // instead of an opaque ChannelNotOpen error when the sender is dropped.
+        {
+            let mut inner = self.inner.lock().await;
+            while let Some((_seq, tx, _permit)) = inner.confirm_pending.pop_front() {
+                let _ = tx.send(false);
+            }
+        }
+
         // Send channel.close; dispatcher handles close-ok
         let method = Method::ChannelClose(Box::new(ChannelCloseArgs {
             reply_code: 200,
@@ -1126,6 +1147,25 @@ impl Channel {
         // Brief wait for close-ok
         let _ = tokio::time::timeout(Duration::from_millis(500), self.rpc_rx.recv()).await;
         Ok(())
+    }
+}
+
+impl Drop for Channel {
+    fn drop(&mut self) {
+        if self.explicitly_closed {
+            return;
+        }
+        // Best-effort channel.close so the broker releases resources promptly.
+        let frame = Frame::Method(
+            self.id,
+            Box::new(Method::ChannelClose(Box::new(ChannelCloseArgs {
+                reply_code: 200,
+                reply_text: "Normal shutdown".into(),
+                class_id: 0,
+                method_id: 0,
+            }))),
+        );
+        let _ = self.writer_tx.try_send(WriterCommand::SendFrame(frame));
     }
 }
 
@@ -1269,6 +1309,14 @@ async fn dispatcher_loop(
                             method_id: args.method_id,
                             initiated_by_server: true,
                         });
+                        // Drain pending confirms so publishers don't hang
+                        {
+                            let mut inner = inner.lock().await;
+                            while let Some((_seq, tx, _permit)) = inner.confirm_pending.pop_front()
+                            {
+                                let _ = tx.send(false);
+                            }
+                        }
                         let close_ok = Frame::Method(channel_id, Box::new(Method::ChannelCloseOk));
                         let _ = writer_tx.send(WriterCommand::SendFrame(close_ok)).await;
                         let _ = rpc_tx.send(*method);
@@ -1303,7 +1351,9 @@ async fn dispatcher_loop(
                             info,
                             header,
                             body_size,
-                            accumulated: Vec::with_capacity(body_size as usize),
+                            accumulated: Vec::with_capacity(
+                            usize::try_from(body_size).unwrap_or(usize::MAX),
+                        ),
                         };
                     }
                 }

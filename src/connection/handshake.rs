@@ -56,16 +56,50 @@ pub(crate) async fn perform(
         client_properties.insert("connection_name", name.as_str());
     }
 
-    // PLAIN: \0username\0password
-    let mut response = Vec::new();
-    response.push(0);
-    response.extend_from_slice(opts.username.as_bytes());
-    response.push(0);
-    response.extend_from_slice(opts.password.as_str().as_bytes());
+    // Merge user-provided client properties (user values take precedence,
+    // except `capabilities` which is merged at the table level).
+    if let Some(ref custom) = opts.client_properties {
+        for (key, value) in custom.iter() {
+            if key == "capabilities" {
+                // Merge capability tables instead of replacing
+                if let FieldValue::Table(user_caps) = value {
+                    let merged = match client_properties.remove("capabilities") {
+                        Some(FieldValue::Table(base_caps)) => {
+                            let mut merged = base_caps;
+                            for (ck, cv) in user_caps.iter() {
+                                merged.insert(ck, cv.clone());
+                            }
+                            merged
+                        }
+                        _ => user_caps.clone(),
+                    };
+                    client_properties.insert("capabilities", FieldValue::Table(merged));
+                }
+            } else {
+                client_properties.insert(key, value.clone());
+            }
+        }
+    }
+
+    use crate::connection::AuthMechanism;
+
+    let response = match opts.auth_mechanism {
+        AuthMechanism::External => Vec::new(),
+        _ => {
+            // PLAIN: \0username\0password
+            let mut buf = Vec::new();
+            buf.push(0);
+            buf.extend_from_slice(opts.username.as_bytes());
+            buf.push(0);
+            buf.extend_from_slice(opts.password.as_str().as_bytes());
+            buf
+        }
+    };
+    let mechanism = opts.auth_mechanism.as_str().into();
 
     let start_ok = Method::ConnectionStartOk(Box::new(ConnectionStartOkArgs {
         client_properties,
-        mechanism: "PLAIN".into(),
+        mechanism,
         response,
         locale: "en_US".into(),
     }));

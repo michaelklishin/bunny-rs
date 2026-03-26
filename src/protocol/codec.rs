@@ -17,6 +17,8 @@ enum CodecState {
 pub struct AmqpCodec {
     state: CodecState,
     max_frame_size: u32,
+    /// Reusable scratch buffer for frame serialization, avoiding per-frame allocation.
+    encode_buf: Vec<u8>,
 }
 
 impl AmqpCodec {
@@ -24,6 +26,7 @@ impl AmqpCodec {
         Self {
             state: CodecState::AwaitingProtocolHeader,
             max_frame_size,
+            encode_buf: Vec::with_capacity(256),
         }
     }
 
@@ -31,6 +34,7 @@ impl AmqpCodec {
         Self {
             state: CodecState::Framing,
             max_frame_size,
+            encode_buf: Vec::with_capacity(256),
         }
     }
 }
@@ -166,9 +170,9 @@ impl Encoder<Frame> for AmqpCodec {
     type Error = ProtocolError;
 
     fn encode(&mut self, frame: Frame, dst: &mut BytesMut) -> Result<(), ProtocolError> {
-        let mut buf = Vec::with_capacity(128);
-        serialize_frame(&frame, &mut buf);
-        dst.extend_from_slice(&buf);
+        self.encode_buf.clear();
+        serialize_frame(&frame, &mut self.encode_buf)?;
+        dst.extend_from_slice(&self.encode_buf);
         Ok(())
     }
 }

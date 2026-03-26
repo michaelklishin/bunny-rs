@@ -9,7 +9,7 @@ use compact_str::CompactString;
 use crate::protocol::types::{FieldTable, FieldValue};
 
 fn duration_to_millis_i64(d: Duration) -> i64 {
-    i64::try_from(d.as_millis()).expect("duration overflows i64 milliseconds")
+    i64::try_from(d.as_millis()).unwrap_or(i64::MAX)
 }
 
 //
@@ -415,6 +415,10 @@ impl ExchangeDeclareOptions {
             durable: true,
             ..Default::default()
         }
+    }
+
+    pub fn alternate_exchange(self, exchange: &str) -> Self {
+        self.with_argument("alternate-exchange", exchange)
     }
 
     pub fn with_argument(

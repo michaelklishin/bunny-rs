@@ -21,11 +21,20 @@ use crate::protocol::frame::Frame;
 use crate::protocol::method::*;
 use crate::transport::Transport;
 
-pub(crate) struct RecoveryConfig {
+/// Connection recovery settings.
+///
+/// When the connection drops, the client will reconnect and replay the
+/// recorded topology (exchanges, queues, bindings, consumers).
+#[derive(Clone)]
+pub struct RecoveryConfig {
     pub enabled: bool,
+    /// Replay recorded topology (exchanges, queues, bindings, consumers)
+    /// after reconnecting. Default: `true`.
+    pub topology_recovery: bool,
     pub initial_interval: Duration,
     pub max_interval: Duration,
     pub backoff_multiplier: f64,
+    /// `None` means unlimited attempts.
     pub max_attempts: Option<u32>,
 }
 
@@ -33,6 +42,7 @@ impl Default for RecoveryConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            topology_recovery: true,
             initial_interval: Duration::from_secs(5),
             max_interval: Duration::from_secs(60),
             backoff_multiplier: 2.0,
@@ -63,6 +73,10 @@ pub(crate) async fn attempt_recovery(
 
         match try_reconnect(opts, resolver).await {
             Ok(mut transport) => {
+                if !config.topology_recovery {
+                    tracing::info!(attempt, "connection recovery succeeded (topology replay skipped)");
+                    return Some((transport, Vec::new()));
+                }
                 match replay_topology(&mut transport, opts, topology, event_tx).await {
                     Ok(changes) => {
                         tracing::info!(attempt, "connection recovery succeeded");

@@ -291,3 +291,34 @@ async fn test_topic_routing() {
     ch.close().await.unwrap();
     conn.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn test_alternate_exchange() {
+    let conn = connect().await;
+    let mut ch = conn.open_channel().await.unwrap();
+
+    ch.declare_fanout("bunny-rs.test.alt-ae").await.unwrap();
+
+    // Declare with alternate-exchange argument
+    ch.exchange_declare(
+        "bunny-rs.test.alt-primary",
+        "direct",
+        ExchangeDeclareOptions::default().alternate_exchange("bunny-rs.test.alt-ae"),
+    )
+    .await
+    .unwrap();
+
+    // Passive redeclare succeeds (confirms it was created correctly)
+    ch.exchange_declare_passive("bunny-rs.test.alt-primary")
+        .await
+        .unwrap();
+
+    ch.exchange_delete("bunny-rs.test.alt-primary", ExchangeDeleteOptions::default())
+        .await
+        .unwrap();
+    ch.exchange_delete("bunny-rs.test.alt-ae", ExchangeDeleteOptions::default())
+        .await
+        .unwrap();
+    ch.close().await.unwrap();
+    conn.close().await.unwrap();
+}

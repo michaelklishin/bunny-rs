@@ -8,6 +8,56 @@ use crate::errors::{NomError, ProtocolError};
 use crate::protocol::constants::*;
 use crate::protocol::method::{Method, parse_method, serialize_method};
 
+/// Pre-encode method + header + body frames into a single `Bytes` buffer.
+pub fn serialize_publish_frames(
+    channel_id: u16,
+    method: &Method,
+    properties_raw: &[u8],
+    body: &[u8],
+    max_body: usize,
+) -> Result<Bytes, ProtocolError> {
+    // Estimate: method ~64, header ~32 + props, body + frame overhead per chunk
+    let estimate = 128 + properties_raw.len() + body.len() + FRAME_OVERHEAD * 3;
+    let mut buf = Vec::with_capacity(estimate);
+
+    // Method frame
+    buf.push(FRAME_METHOD);
+    buf.extend_from_slice(&channel_id.to_be_bytes());
+    let size_pos = buf.len();
+    buf.extend_from_slice(&0u32.to_be_bytes());
+    serialize_method(method, &mut buf)?;
+    let payload_size = (buf.len() - size_pos - 4) as u32;
+    buf[size_pos..size_pos + 4].copy_from_slice(&payload_size.to_be_bytes());
+    buf.push(FRAME_END);
+
+    // Header frame
+    buf.push(FRAME_HEADER);
+    buf.extend_from_slice(&channel_id.to_be_bytes());
+    let size_pos = buf.len();
+    buf.extend_from_slice(&0u32.to_be_bytes());
+    buf.extend_from_slice(&CLASS_BASIC.to_be_bytes());
+    buf.extend_from_slice(&0u16.to_be_bytes()); // weight
+    buf.extend_from_slice(&(body.len() as u64).to_be_bytes());
+    buf.extend_from_slice(properties_raw);
+    let payload_size = (buf.len() - size_pos - 4) as u32;
+    buf[size_pos..size_pos + 4].copy_from_slice(&payload_size.to_be_bytes());
+    buf.push(FRAME_END);
+
+    // Body frame(s)
+    if !body.is_empty() {
+        let chunk_size = if max_body == 0 { body.len() } else { max_body };
+        for chunk in body.chunks(chunk_size) {
+            buf.push(FRAME_BODY);
+            buf.extend_from_slice(&channel_id.to_be_bytes());
+            buf.extend_from_slice(&(chunk.len() as u32).to_be_bytes());
+            buf.extend_from_slice(chunk);
+            buf.push(FRAME_END);
+        }
+    }
+
+    Ok(Bytes::from(buf))
+}
+
 use nom::IResult;
 use nom::bytes::complete::take;
 use nom::number::complete::{be_u8, be_u16, be_u32, be_u64};
@@ -87,7 +137,7 @@ pub fn parse_frame(input: &[u8]) -> NomResult<'_, Frame> {
 /// Serialize a frame.
 ///
 /// Wire format: type(u8) channel(u16) size(u32) payload(size bytes) end(u8=0xCE)
-pub fn serialize_frame(frame: &Frame, buf: &mut Vec<u8>) {
+pub fn serialize_frame(frame: &Frame, buf: &mut Vec<u8>) -> Result<(), ProtocolError> {
     match frame {
         Frame::Method(channel_id, method) => {
             buf.push(FRAME_METHOD);
@@ -97,7 +147,7 @@ pub fn serialize_frame(frame: &Frame, buf: &mut Vec<u8>) {
             let size_pos = buf.len();
             buf.extend_from_slice(&0u32.to_be_bytes());
 
-            serialize_method(method, buf);
+            serialize_method(method, buf)?;
 
             // Patch payload size
             let payload_size = (buf.len() - size_pos - 4) as u32;
@@ -138,4 +188,5 @@ pub fn serialize_frame(frame: &Frame, buf: &mut Vec<u8>) {
             buf.push(FRAME_END);
         }
     }
+    Ok(())
 }

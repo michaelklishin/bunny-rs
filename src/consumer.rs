@@ -8,7 +8,9 @@ use compact_str::CompactString;
 use tokio::sync::oneshot;
 
 use crate::channel::Delivery;
-use crate::connection::ConnectionError;
+use crate::connection::{ConnectionError, WriterCommand, WriterTx};
+use crate::protocol::frame::Frame;
+use crate::protocol::method::{BasicCancelArgs, Method};
 
 /// Stateful message consumer. Methods are called sequentially.
 pub trait Consumer: Send + 'static {
@@ -29,14 +31,23 @@ pub trait Consumer: Send + 'static {
 /// Handle for cancelling a `basic_consume_with` consumer.
 pub struct ConsumerHandle {
     consumer_tag: CompactString,
-    cancel_tx: tokio::sync::oneshot::Sender<()>,
+    cancel_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    channel_id: u16,
+    writer_tx: WriterTx,
 }
 
 impl ConsumerHandle {
-    pub(crate) fn new(consumer_tag: CompactString, cancel_tx: oneshot::Sender<()>) -> Self {
+    pub(crate) fn new(
+        consumer_tag: CompactString,
+        cancel_tx: oneshot::Sender<()>,
+        channel_id: u16,
+        writer_tx: WriterTx,
+    ) -> Self {
         Self {
             consumer_tag,
-            cancel_tx,
+            cancel_tx: Some(cancel_tx),
+            channel_id,
+            writer_tx,
         }
     }
 
@@ -45,7 +56,32 @@ impl ConsumerHandle {
     }
 
     /// Stop the background consumer task.
-    pub fn cancel(self) {
-        let _ = self.cancel_tx.send(());
+    pub fn cancel(mut self) {
+        self.stop_task();
+        self.send_basic_cancel();
+    }
+
+    fn stop_task(&mut self) {
+        if let Some(tx) = self.cancel_tx.take() {
+            let _ = tx.send(());
+        }
+    }
+
+    fn send_basic_cancel(&self) {
+        let frame = Frame::Method(
+            self.channel_id,
+            Box::new(Method::BasicCancel(Box::new(BasicCancelArgs {
+                consumer_tag: self.consumer_tag.clone(),
+                nowait: true,
+            }))),
+        );
+        let _ = self.writer_tx.try_send(WriterCommand::SendFrame(frame));
+    }
+}
+
+impl Drop for ConsumerHandle {
+    fn drop(&mut self) {
+        self.stop_task();
+        self.send_basic_cancel();
     }
 }

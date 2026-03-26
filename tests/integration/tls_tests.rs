@@ -10,21 +10,30 @@ mod tls {
     use bunny_rs::options::{PublishOptions, QueueDeclareOptions, QueueDeleteOptions};
     use bunny_rs::transport::tls::TlsOptions;
 
+    /// Resolve the TLS certificate directory.
+    ///
+    /// Checked in order:
+    /// 1. `TLS_CERTS_DIR` env var (set by CI)
+    /// 2. `tests/tls/certs/` relative to `CARGO_MANIFEST_DIR`
+    /// 3. `~/Development/Opensource/tls-gen.git/basic/result` (local dev)
     fn tls_certs_dir() -> PathBuf {
         if let Ok(dir) = std::env::var("TLS_CERTS_DIR") {
-            PathBuf::from(dir)
-        } else {
-            dirs_for_tls_gen()
+            return PathBuf::from(dir);
         }
-    }
 
-    fn dirs_for_tls_gen() -> PathBuf {
+        let manifest =
+            std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+        let in_repo = PathBuf::from(&manifest).join("tests/tls/certs");
+        if in_repo.exists() {
+            return in_repo;
+        }
+
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
         PathBuf::from(home).join("Development/Opensource/tls-gen.git/basic/result")
     }
 
     #[tokio::test]
-    #[ignore]
+    #[ignore = "requires TLS certificates and RabbitMQ TLS listener on port 5671"]
     async fn test_tls_connection() {
         let certs = tls_certs_dir();
         let ca_pem = certs.join("ca_certificate.pem");
@@ -66,7 +75,7 @@ mod tls {
     }
 
     #[tokio::test]
-    #[ignore]
+    #[ignore = "requires TLS certificates and RabbitMQ TLS listener on port 5671"]
     async fn test_tls_connection_via_uri() {
         let certs = tls_certs_dir();
         let ca_pem = certs.join("ca_certificate.pem");
@@ -76,8 +85,6 @@ mod tls {
             return;
         }
 
-        // amqps:// URI triggers TLS with system roots by default,
-        // but we need the custom CA for self-signed certs
         let tls = TlsOptions::with_ca_pem("localhost", &ca_pem).unwrap();
         let mut opts = ConnectionOptions::from_uri("amqps://guest:guest@localhost:5671/").unwrap();
         opts.tls = Some(tls);
@@ -88,7 +95,7 @@ mod tls {
     }
 
     #[tokio::test]
-    #[ignore]
+    #[ignore = "requires TLS certificates and RabbitMQ TLS listener on port 5671"]
     async fn test_mutual_tls() {
         let certs = tls_certs_dir();
         let ca_pem = certs.join("ca_certificate.pem");
@@ -110,6 +117,68 @@ mod tls {
 
         let conn = Connection::open(opts).await.unwrap();
         assert!(conn.is_open());
+        conn.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TLS certificates and RabbitMQ TLS listener on port 5671"]
+    async fn test_tls_publish_consume() {
+        let certs = tls_certs_dir();
+        let ca_pem = certs.join("ca_certificate.pem");
+
+        if !ca_pem.exists() {
+            eprintln!("skipping TLS test: {} not found", ca_pem.display());
+            return;
+        }
+
+        let tls = TlsOptions::with_ca_pem("localhost", &ca_pem).unwrap();
+        let opts = ConnectionOptions {
+            host: "localhost".into(),
+            port: 5671,
+            tls: Some(tls),
+            ..Default::default()
+        };
+
+        let conn = Connection::open(opts).await.unwrap();
+        let mut ch = conn.open_channel().await.unwrap();
+        ch.basic_qos(10).await.unwrap();
+
+        ch.queue_declare(
+            "bunny-rs.test.tls-pub-con",
+            QueueDeclareOptions::default(),
+        )
+        .await
+        .unwrap();
+
+        ch.consume_with_manual_acks("bunny-rs.test.tls-pub-con", "")
+            .await
+            .unwrap();
+
+        ch.basic_publish(
+            "",
+            "bunny-rs.test.tls-pub-con",
+            &PublishOptions::default(),
+            b"encrypted payload",
+        )
+        .await
+        .unwrap();
+
+        let delivery = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            ch.recv_delivery(),
+        )
+        .await
+        .expect("timed out")
+        .unwrap()
+        .expect("no delivery");
+
+        assert_eq!(&delivery.body[..], b"encrypted payload");
+        ch.basic_ack(delivery.delivery_tag, false).await.unwrap();
+
+        ch.queue_delete("bunny-rs.test.tls-pub-con", QueueDeleteOptions::default())
+            .await
+            .unwrap();
+        ch.close().await.unwrap();
         conn.close().await.unwrap();
     }
 }

@@ -149,3 +149,15 @@ async fn test_confirm_select() {
     ch.close().await.unwrap();
     conn.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn test_basic_qos_global() {
+    let conn = connect().await;
+    let mut ch = conn.open_channel().await.unwrap();
+
+    ch.basic_qos(10).await.unwrap();
+    ch.basic_qos_global(20, true).await.unwrap();
+
+    ch.close().await.unwrap();
+    conn.close().await.unwrap();
+}

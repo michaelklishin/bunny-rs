@@ -22,8 +22,10 @@ pub use channel::{
 };
 pub use confirm_channel::ConfirmChannel;
 pub use connection::endpoint::{AddressResolver, Endpoint};
+pub use connection::recovery::RecoveryConfig;
 pub use connection::{
-    Connection, ConnectionError, ConnectionEvent, ConnectionOptions, TopologyRecoveryFilter,
+    AuthMechanism, Connection, ConnectionError, ConnectionEvent, ConnectionOptions,
+    TopologyRecoveryFilter,
 };
 pub use consumer::{Consumer, ConsumerHandle};
 pub use options::{

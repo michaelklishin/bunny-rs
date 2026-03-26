@@ -999,7 +999,7 @@ pub fn parse_method(input: &[u8]) -> NomResult<'_, Method> {
 // Serialization
 //
 
-pub fn serialize_method(method: &Method, buf: &mut Vec<u8>) {
+pub fn serialize_method(method: &Method, buf: &mut Vec<u8>) -> Result<(), ProtocolError> {
     match method {
         // ── Connection ──
         Method::ConnectionStart(args) => {
@@ -1015,9 +1015,9 @@ pub fn serialize_method(method: &Method, buf: &mut Vec<u8>) {
             buf.extend_from_slice(&CLASS_CONNECTION.to_be_bytes());
             buf.extend_from_slice(&METHOD_CONNECTION_START_OK.to_be_bytes());
             serialize_field_table(&args.client_properties, buf);
-            serialize_short_string(&args.mechanism, buf).expect("mechanism too long");
+            serialize_short_string(&args.mechanism, buf)?;
             serialize_long_string(&args.response, buf);
-            serialize_short_string(&args.locale, buf).expect("locale too long");
+            serialize_short_string(&args.locale, buf)?;
         }
         Method::ConnectionSecure(args) => {
             buf.extend_from_slice(&CLASS_CONNECTION.to_be_bytes());
@@ -1046,7 +1046,7 @@ pub fn serialize_method(method: &Method, buf: &mut Vec<u8>) {
         Method::ConnectionOpen(args) => {
             buf.extend_from_slice(&CLASS_CONNECTION.to_be_bytes());
             buf.extend_from_slice(&METHOD_CONNECTION_OPEN.to_be_bytes());
-            serialize_short_string(&args.vhost, buf).expect("vhost too long");
+            serialize_short_string(&args.vhost, buf)?;
             // reserved-1 (short string ""), reserved-2 (bit 0)
             buf.push(0);
             buf.push(0);
@@ -1061,7 +1061,7 @@ pub fn serialize_method(method: &Method, buf: &mut Vec<u8>) {
             buf.extend_from_slice(&CLASS_CONNECTION.to_be_bytes());
             buf.extend_from_slice(&METHOD_CONNECTION_CLOSE.to_be_bytes());
             buf.extend_from_slice(&args.reply_code.to_be_bytes());
-            serialize_short_string(&args.reply_text, buf).expect("reply_text too long");
+            serialize_short_string(&args.reply_text, buf)?;
             buf.extend_from_slice(&args.class_id.to_be_bytes());
             buf.extend_from_slice(&args.method_id.to_be_bytes());
         }
@@ -1072,7 +1072,7 @@ pub fn serialize_method(method: &Method, buf: &mut Vec<u8>) {
         Method::ConnectionBlocked(args) => {
             buf.extend_from_slice(&CLASS_CONNECTION.to_be_bytes());
             buf.extend_from_slice(&METHOD_CONNECTION_BLOCKED.to_be_bytes());
-            serialize_short_string(&args.reason, buf).expect("reason too long");
+            serialize_short_string(&args.reason, buf)?;
         }
         Method::ConnectionUnblocked => {
             buf.extend_from_slice(&CLASS_CONNECTION.to_be_bytes());
@@ -1082,7 +1082,7 @@ pub fn serialize_method(method: &Method, buf: &mut Vec<u8>) {
             buf.extend_from_slice(&CLASS_CONNECTION.to_be_bytes());
             buf.extend_from_slice(&METHOD_CONNECTION_UPDATE_SECRET.to_be_bytes());
             serialize_long_string(&args.secret, buf);
-            serialize_short_string(&args.reason, buf).expect("reason too long");
+            serialize_short_string(&args.reason, buf)?;
         }
         Method::ConnectionUpdateSecretOk => {
             buf.extend_from_slice(&CLASS_CONNECTION.to_be_bytes());
@@ -1116,7 +1116,7 @@ pub fn serialize_method(method: &Method, buf: &mut Vec<u8>) {
             buf.extend_from_slice(&CLASS_CHANNEL.to_be_bytes());
             buf.extend_from_slice(&METHOD_CHANNEL_CLOSE.to_be_bytes());
             buf.extend_from_slice(&args.reply_code.to_be_bytes());
-            serialize_short_string(&args.reply_text, buf).expect("reply_text too long");
+            serialize_short_string(&args.reply_text, buf)?;
             buf.extend_from_slice(&args.class_id.to_be_bytes());
             buf.extend_from_slice(&args.method_id.to_be_bytes());
         }
@@ -1130,8 +1130,8 @@ pub fn serialize_method(method: &Method, buf: &mut Vec<u8>) {
             buf.extend_from_slice(&CLASS_EXCHANGE.to_be_bytes());
             buf.extend_from_slice(&METHOD_EXCHANGE_DECLARE.to_be_bytes());
             buf.extend_from_slice(&0u16.to_be_bytes()); // ticket
-            serialize_short_string(&args.exchange, buf).expect("exchange too long");
-            serialize_short_string(&args.kind, buf).expect("kind too long");
+            serialize_short_string(&args.exchange, buf)?;
+            serialize_short_string(&args.kind, buf)?;
             let bits = pack_bools(&[
                 args.passive,
                 args.durable,
@@ -1150,7 +1150,7 @@ pub fn serialize_method(method: &Method, buf: &mut Vec<u8>) {
             buf.extend_from_slice(&CLASS_EXCHANGE.to_be_bytes());
             buf.extend_from_slice(&METHOD_EXCHANGE_DELETE.to_be_bytes());
             buf.extend_from_slice(&0u16.to_be_bytes()); // ticket
-            serialize_short_string(&args.exchange, buf).expect("exchange too long");
+            serialize_short_string(&args.exchange, buf)?;
             let bits = pack_bools(&[args.if_unused, args.nowait]);
             buf.push(bits);
         }
@@ -1162,9 +1162,9 @@ pub fn serialize_method(method: &Method, buf: &mut Vec<u8>) {
             buf.extend_from_slice(&CLASS_EXCHANGE.to_be_bytes());
             buf.extend_from_slice(&METHOD_EXCHANGE_BIND.to_be_bytes());
             buf.extend_from_slice(&0u16.to_be_bytes()); // ticket
-            serialize_short_string(&args.destination, buf).expect("destination too long");
-            serialize_short_string(&args.source, buf).expect("source too long");
-            serialize_short_string(&args.routing_key, buf).expect("routing_key too long");
+            serialize_short_string(&args.destination, buf)?;
+            serialize_short_string(&args.source, buf)?;
+            serialize_short_string(&args.routing_key, buf)?;
             buf.push(if args.nowait { 1 } else { 0 });
             serialize_field_table(&args.arguments, buf);
         }
@@ -1176,9 +1176,9 @@ pub fn serialize_method(method: &Method, buf: &mut Vec<u8>) {
             buf.extend_from_slice(&CLASS_EXCHANGE.to_be_bytes());
             buf.extend_from_slice(&METHOD_EXCHANGE_UNBIND.to_be_bytes());
             buf.extend_from_slice(&0u16.to_be_bytes()); // ticket
-            serialize_short_string(&args.destination, buf).expect("destination too long");
-            serialize_short_string(&args.source, buf).expect("source too long");
-            serialize_short_string(&args.routing_key, buf).expect("routing_key too long");
+            serialize_short_string(&args.destination, buf)?;
+            serialize_short_string(&args.source, buf)?;
+            serialize_short_string(&args.routing_key, buf)?;
             buf.push(if args.nowait { 1 } else { 0 });
             serialize_field_table(&args.arguments, buf);
         }
@@ -1192,7 +1192,7 @@ pub fn serialize_method(method: &Method, buf: &mut Vec<u8>) {
             buf.extend_from_slice(&CLASS_QUEUE.to_be_bytes());
             buf.extend_from_slice(&METHOD_QUEUE_DECLARE.to_be_bytes());
             buf.extend_from_slice(&0u16.to_be_bytes()); // ticket
-            serialize_short_string(&args.queue, buf).expect("queue too long");
+            serialize_short_string(&args.queue, buf)?;
             let bits = pack_bools(&[
                 args.passive,
                 args.durable,
@@ -1206,7 +1206,7 @@ pub fn serialize_method(method: &Method, buf: &mut Vec<u8>) {
         Method::QueueDeclareOk(args) => {
             buf.extend_from_slice(&CLASS_QUEUE.to_be_bytes());
             buf.extend_from_slice(&METHOD_QUEUE_DECLARE_OK.to_be_bytes());
-            serialize_short_string(&args.queue, buf).expect("queue too long");
+            serialize_short_string(&args.queue, buf)?;
             buf.extend_from_slice(&args.message_count.to_be_bytes());
             buf.extend_from_slice(&args.consumer_count.to_be_bytes());
         }
@@ -1214,9 +1214,9 @@ pub fn serialize_method(method: &Method, buf: &mut Vec<u8>) {
             buf.extend_from_slice(&CLASS_QUEUE.to_be_bytes());
             buf.extend_from_slice(&METHOD_QUEUE_BIND.to_be_bytes());
             buf.extend_from_slice(&0u16.to_be_bytes()); // ticket
-            serialize_short_string(&args.queue, buf).expect("queue too long");
-            serialize_short_string(&args.exchange, buf).expect("exchange too long");
-            serialize_short_string(&args.routing_key, buf).expect("routing_key too long");
+            serialize_short_string(&args.queue, buf)?;
+            serialize_short_string(&args.exchange, buf)?;
+            serialize_short_string(&args.routing_key, buf)?;
             buf.push(if args.nowait { 1 } else { 0 });
             serialize_field_table(&args.arguments, buf);
         }
@@ -1228,7 +1228,7 @@ pub fn serialize_method(method: &Method, buf: &mut Vec<u8>) {
             buf.extend_from_slice(&CLASS_QUEUE.to_be_bytes());
             buf.extend_from_slice(&METHOD_QUEUE_PURGE.to_be_bytes());
             buf.extend_from_slice(&0u16.to_be_bytes()); // ticket
-            serialize_short_string(&args.queue, buf).expect("queue too long");
+            serialize_short_string(&args.queue, buf)?;
             buf.push(if args.nowait { 1 } else { 0 });
         }
         Method::QueuePurgeOk(args) => {
@@ -1240,7 +1240,7 @@ pub fn serialize_method(method: &Method, buf: &mut Vec<u8>) {
             buf.extend_from_slice(&CLASS_QUEUE.to_be_bytes());
             buf.extend_from_slice(&METHOD_QUEUE_DELETE.to_be_bytes());
             buf.extend_from_slice(&0u16.to_be_bytes()); // ticket
-            serialize_short_string(&args.queue, buf).expect("queue too long");
+            serialize_short_string(&args.queue, buf)?;
             let bits = pack_bools(&[args.if_unused, args.if_empty, args.nowait]);
             buf.push(bits);
         }
@@ -1253,9 +1253,9 @@ pub fn serialize_method(method: &Method, buf: &mut Vec<u8>) {
             buf.extend_from_slice(&CLASS_QUEUE.to_be_bytes());
             buf.extend_from_slice(&METHOD_QUEUE_UNBIND.to_be_bytes());
             buf.extend_from_slice(&0u16.to_be_bytes()); // ticket
-            serialize_short_string(&args.queue, buf).expect("queue too long");
-            serialize_short_string(&args.exchange, buf).expect("exchange too long");
-            serialize_short_string(&args.routing_key, buf).expect("routing_key too long");
+            serialize_short_string(&args.queue, buf)?;
+            serialize_short_string(&args.exchange, buf)?;
+            serialize_short_string(&args.routing_key, buf)?;
             serialize_field_table(&args.arguments, buf);
         }
         Method::QueueUnbindOk => {
@@ -1279,8 +1279,8 @@ pub fn serialize_method(method: &Method, buf: &mut Vec<u8>) {
             buf.extend_from_slice(&CLASS_BASIC.to_be_bytes());
             buf.extend_from_slice(&METHOD_BASIC_CONSUME.to_be_bytes());
             buf.extend_from_slice(&0u16.to_be_bytes()); // ticket
-            serialize_short_string(&args.queue, buf).expect("queue too long");
-            serialize_short_string(&args.consumer_tag, buf).expect("consumer_tag too long");
+            serialize_short_string(&args.queue, buf)?;
+            serialize_short_string(&args.consumer_tag, buf)?;
             // no_local hardcoded to false in serialization
             let bits = pack_bools(&[false, args.no_ack, args.exclusive, args.nowait]);
             buf.push(bits);
@@ -1289,25 +1289,25 @@ pub fn serialize_method(method: &Method, buf: &mut Vec<u8>) {
         Method::BasicConsumeOk(args) => {
             buf.extend_from_slice(&CLASS_BASIC.to_be_bytes());
             buf.extend_from_slice(&METHOD_BASIC_CONSUME_OK.to_be_bytes());
-            serialize_short_string(&args.consumer_tag, buf).expect("consumer_tag too long");
+            serialize_short_string(&args.consumer_tag, buf)?;
         }
         Method::BasicCancel(args) => {
             buf.extend_from_slice(&CLASS_BASIC.to_be_bytes());
             buf.extend_from_slice(&METHOD_BASIC_CANCEL.to_be_bytes());
-            serialize_short_string(&args.consumer_tag, buf).expect("consumer_tag too long");
+            serialize_short_string(&args.consumer_tag, buf)?;
             buf.push(if args.nowait { 1 } else { 0 });
         }
         Method::BasicCancelOk(args) => {
             buf.extend_from_slice(&CLASS_BASIC.to_be_bytes());
             buf.extend_from_slice(&METHOD_BASIC_CANCEL_OK.to_be_bytes());
-            serialize_short_string(&args.consumer_tag, buf).expect("consumer_tag too long");
+            serialize_short_string(&args.consumer_tag, buf)?;
         }
         Method::BasicPublish(args) => {
             buf.extend_from_slice(&CLASS_BASIC.to_be_bytes());
             buf.extend_from_slice(&METHOD_BASIC_PUBLISH.to_be_bytes());
             buf.extend_from_slice(&0u16.to_be_bytes()); // ticket
-            serialize_short_string(&args.exchange, buf).expect("exchange too long");
-            serialize_short_string(&args.routing_key, buf).expect("routing_key too long");
+            serialize_short_string(&args.exchange, buf)?;
+            serialize_short_string(&args.routing_key, buf)?;
             let bits = pack_bools(&[args.mandatory, args.immediate]);
             buf.push(bits);
         }
@@ -1320,9 +1320,9 @@ pub fn serialize_method(method: &Method, buf: &mut Vec<u8>) {
             buf.extend_from_slice(&CLASS_BASIC.to_be_bytes());
             buf.extend_from_slice(&METHOD_BASIC_RETURN.to_be_bytes());
             buf.extend_from_slice(&reply_code.to_be_bytes());
-            serialize_short_string(reply_text, buf).expect("reply_text too long");
-            serialize_short_string(exchange, buf).expect("exchange too long");
-            serialize_short_string(routing_key, buf).expect("routing_key too long");
+            serialize_short_string(reply_text, buf)?;
+            serialize_short_string(exchange, buf)?;
+            serialize_short_string(routing_key, buf)?;
         }
         Method::BasicDeliver {
             consumer_tag,
@@ -1333,17 +1333,17 @@ pub fn serialize_method(method: &Method, buf: &mut Vec<u8>) {
         } => {
             buf.extend_from_slice(&CLASS_BASIC.to_be_bytes());
             buf.extend_from_slice(&METHOD_BASIC_DELIVER.to_be_bytes());
-            serialize_short_string(consumer_tag, buf).expect("consumer_tag too long");
+            serialize_short_string(consumer_tag, buf)?;
             buf.extend_from_slice(&delivery_tag.to_be_bytes());
             buf.push(if *redelivered { 1 } else { 0 });
-            serialize_short_string(exchange, buf).expect("exchange too long");
-            serialize_short_string(routing_key, buf).expect("routing_key too long");
+            serialize_short_string(exchange, buf)?;
+            serialize_short_string(routing_key, buf)?;
         }
         Method::BasicGet(args) => {
             buf.extend_from_slice(&CLASS_BASIC.to_be_bytes());
             buf.extend_from_slice(&METHOD_BASIC_GET.to_be_bytes());
             buf.extend_from_slice(&0u16.to_be_bytes()); // ticket
-            serialize_short_string(&args.queue, buf).expect("queue too long");
+            serialize_short_string(&args.queue, buf)?;
             buf.push(if args.no_ack { 1 } else { 0 });
         }
         Method::BasicGetOk(args) => {
@@ -1351,8 +1351,8 @@ pub fn serialize_method(method: &Method, buf: &mut Vec<u8>) {
             buf.extend_from_slice(&METHOD_BASIC_GET_OK.to_be_bytes());
             buf.extend_from_slice(&args.delivery_tag.to_be_bytes());
             buf.push(if args.redelivered { 1 } else { 0 });
-            serialize_short_string(&args.exchange, buf).expect("exchange too long");
-            serialize_short_string(&args.routing_key, buf).expect("routing_key too long");
+            serialize_short_string(&args.exchange, buf)?;
+            serialize_short_string(&args.routing_key, buf)?;
             buf.extend_from_slice(&args.message_count.to_be_bytes());
         }
         Method::BasicGetEmpty => {
@@ -1439,6 +1439,7 @@ pub fn serialize_method(method: &Method, buf: &mut Vec<u8>) {
             buf.extend_from_slice(&METHOD_CONFIRM_SELECT_OK.to_be_bytes());
         }
     }
+    Ok(())
 }
 
 /// Pack up to 8 boolean flags into a single byte, bit 0 = first element.

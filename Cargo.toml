@@ -7,6 +7,9 @@ description = "A modern, ergonomic RabbitMQ (AMQP 0-9-1) client for Rust"
 license = "MIT OR Apache-2.0"
 keywords = ["rabbitmq", "amqp", "messaging", "async", "tokio"]
 categories = ["network-programming", "asynchronous"]
+repository = "https://github.com/rabbitmq/bunny-rs"
+homepage = "https://github.com/rabbitmq/bunny-rs"
+readme = "README.md"
 
 [dependencies]
 bytes = "1"
