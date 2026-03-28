@@ -24,6 +24,13 @@ This client targets all [supported RabbitMQ release series](https://www.rabbitmq
 but all key operations should work with older series, including RabbitMQ `3.13.x`.
 
 
+## Protocol Implemented
+
+RabbitMQ supports multiple protocols, including AMQP 0-9-1 and AMQP 1.0 (two different protocols).
+
+As the original Bunny (in Ruby) and Bunny Swift, this is an AMQP 0-9-1 client.
+
+
 ## Project Maturity
 
 This is a young project by a long time member of the RabbitMQ Core Team.
