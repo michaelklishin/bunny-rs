@@ -2,7 +2,10 @@
 // Licensed under the Apache License 2.0 and MIT licenses.
 // See LICENSE-APACHE and LICENSE-MIT in the repository root for details.
 
+use std::time::Duration;
+
 use crate::test_helpers::connect;
+use bunny_rs::SubscribeOptions;
 use bunny_rs::options::{
     ConsumeOptions, PublishOptions, QueueDeclareOptions, QueueDeleteOptions, StreamOffset,
 };
@@ -59,31 +62,32 @@ async fn test_stream_publish_and_consume() {
     }
 
     // Consume from the beginning of the stream
-    con_ch.basic_qos(10).await.unwrap();
-    con_ch
-        .basic_consume(
-            "bunny-rs.test.stream-pub-con",
-            "stream-consumer",
-            ConsumeOptions::default().stream_offset(StreamOffset::First),
+    let mut sub = con_ch
+        .queue("bunny-rs.test.stream-pub-con")
+        .subscribe(
+            SubscribeOptions::manual_ack()
+                .consumer_tag("stream-consumer")
+                .prefetch(10)
+                .with_consume(ConsumeOptions::default().stream_offset(StreamOffset::First)),
         )
         .await
         .unwrap();
 
     // Should receive at least the 5 messages we published
     let mut received = 0u32;
-    let timeout = std::time::Duration::from_secs(5);
-    let deadline = tokio::time::Instant::now() + timeout;
-
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while received < 5 {
-        match tokio::time::timeout_at(deadline, con_ch.recv_delivery()).await {
-            Ok(Ok(Some(_))) => received += 1,
-            Ok(Ok(None)) => break,
-            Ok(Err(e)) => panic!("delivery error: {e}"),
+        match tokio::time::timeout_at(deadline, sub.recv()).await {
+            Ok(Some(d)) => {
+                d.ack().await.unwrap();
+                received += 1;
+            }
+            Ok(None) => break,
             Err(_) => break,
         }
     }
-
     assert!(received >= 5, "expected >= 5 deliveries, got {received}");
+    sub.cancel().await.unwrap();
 
     pub_ch
         .queue_delete(
@@ -118,14 +122,14 @@ async fn test_stream_consume_from_offset() {
         .unwrap();
     }
 
-    // Consume with StreamOffset::Last — should only get recent messages
+    // Consume with StreamOffset::Last: should only get recent messages.
     let mut con_ch = conn.open_channel().await.unwrap();
-    con_ch.basic_qos(10).await.unwrap();
-    con_ch
-        .basic_consume(
-            "bunny-rs.test.stream-offset",
-            "",
-            ConsumeOptions::default().stream_offset(StreamOffset::Last),
+    let mut sub = con_ch
+        .queue("bunny-rs.test.stream-offset")
+        .subscribe(
+            SubscribeOptions::manual_ack()
+                .prefetch(10)
+                .with_consume(ConsumeOptions::default().stream_offset(StreamOffset::Last)),
         )
         .await
         .unwrap();
@@ -140,15 +144,13 @@ async fn test_stream_consume_from_offset() {
     .await
     .unwrap();
 
-    // Should receive at least one delivery (either from the tail of the
-    // existing log or the newly published message).
-    let delivery = tokio::time::timeout(std::time::Duration::from_secs(5), con_ch.recv_delivery())
+    let delivery = tokio::time::timeout(Duration::from_secs(5), sub.recv())
         .await
         .expect("timed out waiting for stream delivery")
-        .unwrap()
         .expect("no delivery");
-
     assert!(!delivery.body.is_empty());
+    delivery.ack().await.unwrap();
+    sub.cancel().await.unwrap();
 
     ch.queue_delete("bunny-rs.test.stream-offset", QueueDeleteOptions::default())
         .await

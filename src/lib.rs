@@ -17,7 +17,7 @@ pub mod tx_channel;
 
 // Re-export the types users need most so they don't have to dig into submodules.
 pub use channel::{
-    AmqpReplyCode, Channel, ChannelEvent, ConsumerTag, Delivery, PublishConfirm, QueueInfo,
+    Acker, AmqpReplyCode, Channel, ChannelEvent, ConsumerTag, Delivery, PublishConfirm, QueueInfo,
     ResourceName, ReturnedMessage,
 };
 pub use confirm_channel::ConfirmChannel;
@@ -27,7 +27,7 @@ pub use connection::{
     AuthMechanism, Connection, ConnectionError, ConnectionEvent, ConnectionOptions,
     TopologyRecoveryFilter,
 };
-pub use consumer::{Consumer, ConsumerHandle};
+pub use consumer::{Consumer, ConsumerHandle, DeliveryHandler, SubscribeOptions};
 pub use exchange::Exchange;
 pub use options::{
     ConsumeOptions, ExchangeDeclareOptions, ExchangeDeleteOptions, ExchangeType, PublishOptions,

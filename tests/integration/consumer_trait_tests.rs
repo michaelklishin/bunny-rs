@@ -8,14 +8,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::test_helpers::connect;
 use bunny_rs::Delivery;
 use bunny_rs::connection::ConnectionError;
-use bunny_rs::consumer::Consumer;
+use bunny_rs::consumer::DeliveryHandler;
 use bunny_rs::options::{ConsumeOptions, PublishOptions, QueueDeclareOptions, QueueDeleteOptions};
 
 struct CountingConsumer {
     count: Arc<AtomicU64>,
 }
 
-impl Consumer for CountingConsumer {
+impl DeliveryHandler for CountingConsumer {
     async fn handle_delivery(&mut self, _delivery: Delivery) -> Result<(), ConnectionError> {
         self.count.fetch_add(1, Ordering::Release);
         Ok(())

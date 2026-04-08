@@ -14,7 +14,7 @@ use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, broadcast, mpsc, onesh
 
 use crate::connection::topology::TopologyRegistry;
 use crate::connection::{ConnectionError, WriterCommand, WriterTx};
-use crate::consumer::{Consumer, ConsumerHandle};
+use crate::consumer::{Consumer, ConsumerHandle, DeliveryHandler, SubscribeOptions};
 use crate::exchange::Exchange;
 use crate::options::{
     ConsumeOptions, ExchangeDeclareOptions, ExchangeDeleteOptions, PublishOptions,
@@ -162,12 +162,12 @@ impl ReturnedMessage {
 }
 
 /// Shared channel/dispatcher state.
-struct ChannelInner {
+pub(crate) struct ChannelInner {
     confirm_pending: VecDeque<(u64, oneshot::Sender<bool>, Option<OwnedSemaphorePermit>)>,
     confirm_next_seq: u64,
     confirms_enabled: bool,
     confirm_semaphore: Option<Arc<Semaphore>>,
-    consumers: HashMap<CompactString, mpsc::UnboundedSender<RawDelivery>>,
+    pub(crate) consumers: HashMap<CompactString, mpsc::UnboundedSender<RawDelivery>>,
     // basic.get result sender
     get_result_tx: Option<oneshot::Sender<RawDelivery>>,
     return_tx: mpsc::UnboundedSender<ReturnedMessage>,
@@ -188,14 +188,14 @@ pub struct Channel {
     explicitly_closed: bool,
 }
 
-struct RawDelivery {
-    consumer_tag: CompactString,
-    delivery_tag: u64,
-    redelivered: bool,
-    exchange: CompactString,
-    routing_key: CompactString,
-    header: ContentHeader,
-    body: Bytes,
+pub(crate) struct RawDelivery {
+    pub(crate) consumer_tag: CompactString,
+    pub(crate) delivery_tag: u64,
+    pub(crate) redelivered: bool,
+    pub(crate) exchange: CompactString,
+    pub(crate) routing_key: CompactString,
+    pub(crate) header: ContentHeader,
+    pub(crate) body: Bytes,
 }
 
 /// Handle for a pending publish confirm.
@@ -268,6 +268,10 @@ impl Channel {
 
     pub fn id(&self) -> u16 {
         self.id
+    }
+
+    pub(crate) fn acker(&self) -> Acker {
+        Acker::new(self.id, self.writer_tx.clone())
     }
 
     /// Subscribe to channel lifecycle events.
@@ -896,13 +900,71 @@ impl Channel {
         }
     }
 
-    /// Consume via a [`Consumer`] trait object (background task).
+    /// Internal helper backing
+    /// [`Queue::subscribe_with`](crate::queue::Queue::subscribe_with).
+    pub(crate) async fn start_consumer_with<F, Fut>(
+        &mut self,
+        queue: &str,
+        opts: SubscribeOptions,
+        handler: F,
+    ) -> Result<ConsumerHandle, ConnectionError>
+    where
+        F: FnMut(Delivery) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<(), ConnectionError>> + Send + 'static,
+    {
+        let (consume_opts, tag) = self.prepare_subscribe(opts).await?;
+        self.basic_consume_with(queue, &tag, consume_opts, ClosureHandler { f: handler })
+            .await
+    }
+
+    /// Internal helper backing
+    /// [`Queue::subscribe`](crate::queue::Queue::subscribe).
+    pub(crate) async fn start_consumer(
+        &mut self,
+        queue: &str,
+        opts: SubscribeOptions,
+    ) -> Result<Consumer, ConnectionError> {
+        let (consume_opts, tag) = self.prepare_subscribe(opts).await?;
+        let actual_tag = self.basic_consume(queue, &tag, consume_opts).await?;
+        let delivery_rx = self
+            .delivery_rxs
+            .remove(&actual_tag)
+            .ok_or(ConnectionError::ChannelNotOpen)?;
+        Ok(Consumer::new(
+            actual_tag,
+            self.id,
+            self.writer_tx.clone(),
+            self.inner.clone(),
+            delivery_rx,
+            self.acker(),
+        ))
+    }
+
+    /// Apply prefetch and resolve a non-empty consumer tag. A non-empty tag is
+    /// required so that `basic_consume` pre-registers the delivery sender
+    /// before the RPC, closing a race where the broker's first delivery would
+    /// otherwise land before the post-`BasicConsumeOk` insert.
+    async fn prepare_subscribe(
+        &mut self,
+        opts: SubscribeOptions,
+    ) -> Result<(ConsumeOptions, CompactString), ConnectionError> {
+        if let Some(prefetch) = opts.prefetch {
+            self.basic_qos(prefetch).await?;
+        }
+        let tag = match opts.consumer_tag {
+            Some(t) if !t.is_empty() => t,
+            _ => generate_consumer_tag(),
+        };
+        Ok((opts.consume, tag))
+    }
+
+    /// Consume via a [`DeliveryHandler`] trait object (background task).
     pub async fn basic_consume_with(
         &mut self,
         queue: &str,
         consumer_tag: &str,
         opts: ConsumeOptions,
-        mut consumer: impl Consumer,
+        mut consumer: impl DeliveryHandler,
     ) -> Result<ConsumerHandle, ConnectionError> {
         let tag = self.basic_consume(queue, consumer_tag, opts).await?;
         consumer.handle_consume_ok(&tag);
@@ -914,6 +976,7 @@ impl Channel {
             .ok_or(ConnectionError::ChannelNotOpen)?;
 
         let tag_clone = tag.clone();
+        let acker = self.acker();
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -922,7 +985,8 @@ impl Channel {
                     delivery = delivery_rx.recv() => {
                         match delivery {
                             Some(raw) => {
-                                if consumer.handle_delivery(Delivery::from(raw)).await.is_err() {
+                                let delivery = Delivery::from_raw(raw, acker.clone());
+                                if consumer.handle_delivery(delivery).await.is_err() {
                                     break;
                                 }
                             }
@@ -938,6 +1002,7 @@ impl Channel {
             cancel_tx,
             self.id,
             self.writer_tx.clone(),
+            self.inner.clone(),
         ))
     }
 
@@ -973,7 +1038,7 @@ impl Channel {
                     .await
                     .map_err(|_| ConnectionError::Timeout)?
                     .map_err(|_| ConnectionError::NotConnected)?;
-                Ok(Some(Delivery::from(raw)))
+                Ok(Some(Delivery::from_raw(raw, self.acker())))
             }
             _ => Err(ConnectionError::UnexpectedMethod),
         }
@@ -1002,40 +1067,6 @@ impl Channel {
             Method::TxRollbackOk => Ok(()),
             _ => Err(ConnectionError::UnexpectedMethod),
         }
-    }
-
-    //
-    // Delivery reception
-    //
-
-    /// Next delivery for the given consumer. `None` if closed.
-    pub async fn recv_delivery_for(
-        &mut self,
-        consumer_tag: &str,
-    ) -> Result<Option<Delivery>, ConnectionError> {
-        let rx = self
-            .delivery_rxs
-            .get_mut(consumer_tag)
-            .ok_or(ConnectionError::ChannelNotOpen)?;
-        match rx.recv().await {
-            Some(raw) => Ok(Some(Delivery::from(raw))),
-            None => Ok(None),
-        }
-    }
-
-    /// Next delivery from any consumer. Best with a single consumer.
-    pub async fn recv_delivery(&mut self) -> Result<Option<Delivery>, ConnectionError> {
-        if self.delivery_rxs.is_empty() {
-            return Err(ConnectionError::ChannelNotOpen);
-        }
-        // With one consumer, just read from it directly
-        if let Some((_, rx)) = self.delivery_rxs.iter_mut().next() {
-            match rx.recv().await {
-                Some(raw) => return Ok(Some(Delivery::from(raw))),
-                None => return Ok(None),
-            }
-        }
-        Err(ConnectionError::ChannelNotOpen)
     }
 
     //
@@ -1330,15 +1361,15 @@ async fn dispatcher_loop(
                         });
                     }
 
-                    // Broker-initiated cancel
+                    // Broker-initiated cancel: per AMQP 0-9-1 the client must
+                    // not reply. Reclaim the consumer entry so any in-flight
+                    // delivery is dropped instead of routed.
                     Method::BasicCancel(args) => {
-                        let close_ok = Frame::Method(
-                            channel_id,
-                            Box::new(Method::BasicCancelOk(Box::new(BasicCancelOkArgs {
-                                consumer_tag: args.consumer_tag,
-                            }))),
-                        );
-                        let _ = writer_tx.send(WriterCommand::SendFrame(close_ok)).await;
+                        inner
+                            .lock()
+                            .await
+                            .consumers
+                            .remove(args.consumer_tag.as_str());
                     }
 
                     // Channel close from broker
@@ -1475,10 +1506,18 @@ async fn dispatch_delivery(
     let mut guard = inner.lock().await;
     match target {
         ContentTarget::Consumer(tag) => {
+            // Try the send; if the receiver is gone (the user dropped the
+            // Consumer / ConsumerHandle), reclaim the entry now.
+            let mut stale = false;
             if let Some(tx) = guard.consumers.get(tag.as_str()) {
-                let _ = tx.send(delivery);
+                if tx.send(delivery).is_err() {
+                    stale = true;
+                }
             } else {
                 tracing::warn!(consumer_tag = %tag, "delivery for unknown consumer, dropping");
+            }
+            if stale {
+                guard.consumers.remove(tag.as_str());
             }
         }
         ContentTarget::PollingConsumerResult => {
@@ -1503,6 +1542,35 @@ async fn dispatch_delivery(
     }
 }
 
+/// Async-closure adapter so closures can stand in for the [`DeliveryHandler`] trait.
+struct ClosureHandler<F> {
+    f: F,
+}
+
+impl<F, Fut> DeliveryHandler for ClosureHandler<F>
+where
+    F: FnMut(Delivery) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<(), ConnectionError>> + Send + 'static,
+{
+    fn handle_delivery(
+        &mut self,
+        delivery: Delivery,
+    ) -> impl std::future::Future<Output = Result<(), ConnectionError>> + Send {
+        (self.f)(delivery)
+    }
+}
+
+/// Generates a client-side consumer tag of the form `bunny-rs-<unix_ms>-<rand>`.
+pub(crate) fn generate_consumer_tag() -> CompactString {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let suffix: u32 = fastrand::u32(..);
+    compact_str::format_compact!("bunny-rs-{ms}-{suffix}")
+}
+
 fn parse_properties_raw(raw: &Bytes) -> BasicProperties {
     if raw.is_empty() {
         BasicProperties::default()
@@ -1513,8 +1581,8 @@ fn parse_properties_raw(raw: &Bytes) -> BasicProperties {
     }
 }
 
-impl From<RawDelivery> for Delivery {
-    fn from(raw: RawDelivery) -> Self {
+impl Delivery {
+    pub(crate) fn from_raw(raw: RawDelivery, acker: Acker) -> Self {
         Self {
             consumer_tag: raw.consumer_tag,
             delivery_tag: raw.delivery_tag,
@@ -1524,6 +1592,7 @@ impl From<RawDelivery> for Delivery {
             body: raw.body,
             properties_raw: raw.header.properties_raw,
             properties_cache: OnceLock::new(),
+            acker,
         }
     }
 }
@@ -1548,6 +1617,62 @@ impl QueueInfo {
     }
 }
 
+/// Cheap, cloneable handle for acknowledging deliveries without holding a
+/// `Channel` reference. Restricted to a specific channel by design: delivery
+/// tags from other channels must not be passed.
+#[derive(Debug, Clone)]
+pub struct Acker {
+    channel_id: u16,
+    writer_tx: WriterTx,
+}
+
+impl Acker {
+    pub(crate) fn new(channel_id: u16, writer_tx: WriterTx) -> Self {
+        Self {
+            channel_id,
+            writer_tx,
+        }
+    }
+
+    async fn send(&self, method: Method) -> Result<(), ConnectionError> {
+        let frame = Frame::Method(self.channel_id, Box::new(method));
+        self.writer_tx
+            .send(WriterCommand::SendFrame(frame))
+            .await
+            .map_err(|_| ConnectionError::NotConnected)
+    }
+
+    pub async fn ack(&self, delivery_tag: u64, multiple: bool) -> Result<(), ConnectionError> {
+        self.send(Method::BasicAck {
+            delivery_tag,
+            multiple,
+        })
+        .await
+    }
+
+    pub async fn nack(
+        &self,
+        delivery_tag: u64,
+        multiple: bool,
+        requeue: bool,
+    ) -> Result<(), ConnectionError> {
+        self.send(Method::BasicNack {
+            delivery_tag,
+            multiple,
+            requeue,
+        })
+        .await
+    }
+
+    pub async fn reject(&self, delivery_tag: u64, requeue: bool) -> Result<(), ConnectionError> {
+        self.send(Method::BasicReject(Box::new(BasicRejectArgs {
+            delivery_tag,
+            requeue,
+        })))
+        .await
+    }
+}
+
 /// A delivered message. Properties parsed lazily.
 #[derive(Debug)]
 pub struct Delivery {
@@ -1559,6 +1684,7 @@ pub struct Delivery {
     pub body: Bytes,
     properties_raw: Bytes,
     properties_cache: OnceLock<BasicProperties>,
+    acker: Acker,
 }
 
 impl Delivery {
@@ -1585,5 +1711,70 @@ impl Delivery {
 
     pub fn content_type(&self) -> Option<&str> {
         self.properties().get_content_type()
+    }
+
+    /// Acknowledge this single delivery.
+    pub async fn ack(&self) -> Result<(), ConnectionError> {
+        self.acker.ack(self.delivery_tag, false).await
+    }
+
+    /// Acknowledge this delivery and all earlier unacknowledged deliveries
+    /// on the same channel.
+    pub async fn ack_multiple(&self) -> Result<(), ConnectionError> {
+        self.acker.ack(self.delivery_tag, true).await
+    }
+
+    /// Negatively acknowledge this delivery and requeue it.
+    pub async fn nack(&self) -> Result<(), ConnectionError> {
+        self.acker.nack(self.delivery_tag, false, true).await
+    }
+
+    /// Negatively acknowledge this delivery and all earlier unacknowledged
+    /// deliveries on the same channel; requeue them.
+    pub async fn nack_multiple(&self) -> Result<(), ConnectionError> {
+        self.acker.nack(self.delivery_tag, true, true).await
+    }
+
+    /// Reject this delivery and requeue it.
+    pub async fn reject(&self) -> Result<(), ConnectionError> {
+        self.acker.reject(self.delivery_tag, true).await
+    }
+
+    /// Reject this delivery and discard it (dead-letter if configured).
+    pub async fn discard(&self) -> Result<(), ConnectionError> {
+        self.acker.reject(self.delivery_tag, false).await
+    }
+
+    /// Clone the [`Acker`] for use after the delivery is consumed (for
+    /// example, when handing the body off to a worker task).
+    pub fn acker(&self) -> Acker {
+        self.acker.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::generate_consumer_tag;
+    use std::collections::HashSet;
+
+    #[test]
+    fn generate_consumer_tag_format() {
+        let tag = generate_consumer_tag();
+        assert!(tag.starts_with("bunny-rs-"));
+        let rest = &tag["bunny-rs-".len()..];
+        let (ms, suffix) = rest.split_once('-').unwrap();
+        assert!(ms.parse::<u64>().is_ok());
+        assert!(suffix.parse::<u32>().is_ok());
+    }
+
+    #[test]
+    fn generate_consumer_tag_is_unique_under_load() {
+        // 1000 invocations, 32 bits of randomness: birthday-paradox collision
+        // probability is ~1.16e-4. A flake here is a real entropy regression.
+        const N: usize = 1000;
+        let mut seen = HashSet::with_capacity(N);
+        for _ in 0..N {
+            assert!(seen.insert(generate_consumer_tag()));
+        }
     }
 }

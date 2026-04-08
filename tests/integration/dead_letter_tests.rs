@@ -5,9 +5,10 @@
 use std::time::Duration;
 
 use crate::test_helpers::connect;
+use bunny_rs::SubscribeOptions;
 use bunny_rs::options::{
-    ConsumeOptions, ExchangeDeclareOptions, ExchangeDeleteOptions, PublishOptions,
-    QueueDeclareOptions, QueueDeleteOptions,
+    ExchangeDeclareOptions, ExchangeDeleteOptions, PublishOptions, QueueDeclareOptions,
+    QueueDeleteOptions,
 };
 use bunny_rs::protocol::types::FieldTable;
 
@@ -55,20 +56,21 @@ async fn test_dead_letter_on_reject() {
     .await
     .unwrap();
 
-    ch.basic_consume(
-        "bunny-rs.test.dl-source",
-        "dl-consumer",
-        ConsumeOptions::default(),
-    )
-    .await
-    .unwrap();
+    let mut sub = ch
+        .queue("bunny-rs.test.dl-source")
+        .subscribe(SubscribeOptions::manual_ack().consumer_tag("dl-consumer"))
+        .await
+        .unwrap();
 
-    let delivery = ch.recv_delivery().await.unwrap().unwrap();
+    let delivery = tokio::time::timeout(Duration::from_secs(5), sub.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(delivery.body.as_ref(), b"dead-letter-me");
 
-    // reject without requeue → routes to DLX
-    ch.basic_reject(delivery.delivery_tag, false).await.unwrap();
-    ch.basic_cancel("dl-consumer").await.unwrap();
+    // Reject without requeue routes to the DLX
+    delivery.discard().await.unwrap();
+    sub.cancel().await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 

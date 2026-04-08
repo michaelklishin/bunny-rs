@@ -8,4 +8,5 @@ mod prop_frame;
 mod prop_heartbeat;
 mod prop_method;
 mod prop_properties;
+mod prop_subscribe_options;
 mod prop_topology;

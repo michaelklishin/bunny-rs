@@ -6,6 +6,7 @@
 mod tls {
     use std::path::PathBuf;
 
+    use bunny_rs::SubscribeOptions;
     use bunny_rs::connection::{Connection, ConnectionOptions};
     use bunny_rs::options::{PublishOptions, QueueDeclareOptions, QueueDeleteOptions};
     use bunny_rs::transport::tls::TlsOptions;
@@ -140,13 +141,14 @@ mod tls {
 
         let conn = Connection::open(opts).await.unwrap();
         let mut ch = conn.open_channel().await.unwrap();
-        ch.basic_qos(10).await.unwrap();
 
         ch.queue_declare("bunny-rs.test.tls-pub-con", QueueDeclareOptions::default())
             .await
             .unwrap();
 
-        ch.consume_with_manual_acks("bunny-rs.test.tls-pub-con", "")
+        let mut sub = ch
+            .queue("bunny-rs.test.tls-pub-con")
+            .subscribe(SubscribeOptions::manual_ack().prefetch(10))
             .await
             .unwrap();
 
@@ -159,14 +161,14 @@ mod tls {
         .await
         .unwrap();
 
-        let delivery = tokio::time::timeout(std::time::Duration::from_secs(5), ch.recv_delivery())
+        let delivery = tokio::time::timeout(std::time::Duration::from_secs(5), sub.recv())
             .await
             .expect("timed out")
-            .unwrap()
             .expect("no delivery");
 
         assert_eq!(&delivery.body[..], b"encrypted payload");
-        ch.basic_ack(delivery.delivery_tag, false).await.unwrap();
+        delivery.ack().await.unwrap();
+        sub.cancel().await.unwrap();
 
         ch.queue_delete("bunny-rs.test.tls-pub-con", QueueDeleteOptions::default())
             .await

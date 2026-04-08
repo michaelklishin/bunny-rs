@@ -19,6 +19,7 @@ nom = "8"
 simdutf8 = "0.1"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros"] }
+tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["codec"] }
 tracing = "0.1"
 url = "2"

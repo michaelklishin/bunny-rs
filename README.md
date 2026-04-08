@@ -149,75 +149,79 @@ let mut confirm_ch = ch.into_confirm_mode_with_tracking(1000).await?;
 
 ### Consuming
 
-With manual acknowledgements:
+`Queue::subscribe` returns a `Consumer`: a `Stream` of self-acknowledging
+`Delivery` values. By design, a `Consumer` is a standalone value: it does
+**not** borrow the `Channel`. The same channel stays usable for publishes,
+declarations, and other consumers while the consume loop runs. This rules out
+a class of bugs where a long-lived consumer monopolises its channel, and
+makes RPC-style request/response handlers natural to write on a single channel.
 
 ```rust
-ch.basic_qos(250).await?;
-ch.consume_with_manual_acks("my-queue", "my-consumer").await?;
+use bunny_rs::SubscribeOptions;
 
-while let Some(delivery) = ch.recv_delivery().await? {
-    println!("{:?}", delivery.body_str().unwrap_or("<binary>"));
-    ch.ack(delivery.delivery_tag).await?;
+let mut consumer = ch.queue("my-queue")
+    .subscribe(SubscribeOptions::manual_ack().prefetch(250))
+    .await?;
+
+while let Some(delivery) = consumer.recv().await {
+    println!("{}", delivery.body_str().unwrap_or("<binary>"));
+    delivery.ack().await?;
 }
 ```
 
-With automatic acknowledgements:
+`Consumer` implements `tokio_stream::Stream`, so any combinator (`next`,
+`try_next`, `filter_map`, ...) works. Auto-ack mode skips the per-message
+`ack()`:
 
 ```rust
-ch.consume_with_auto_acks("my-queue", "my-consumer").await?;
-
-while let Some(delivery) = ch.recv_delivery().await? {
-    println!("{:?}", delivery.body_str().unwrap_or("<binary>"));
+let mut consumer = ch.queue("my-queue").subscribe(SubscribeOptions::auto_ack()).await?;
+while let Some(delivery) = consumer.recv().await {
+    println!("{}", delivery.body_str().unwrap_or("<binary>"));
 }
 ```
 
-Using the `Consumer` trait (runs in a background task):
+Closure form (`Bunny::Queue#subscribe { ... }` from Ruby Bunny): spawns a
+background task and returns a cancellable `ConsumerHandle`.
 
 ```rust
-use bunny_rs::{Consumer, Delivery, ConnectionError, ConsumeOptions};
-
-struct MyConsumer;
-
-impl Consumer for MyConsumer {
-    async fn handle_delivery(&mut self, delivery: Delivery) -> Result<(), ConnectionError> {
+let handle = ch.queue("my-queue")
+    .subscribe_with(SubscribeOptions::manual_ack(), |delivery| async move {
         println!("{:?}", delivery.body_str());
-        Ok(())
-    }
-}
-
-let handle = ch.basic_consume_with("my-queue", "", ConsumeOptions::default(), MyConsumer).await?;
+        delivery.ack().await
+    })
+    .await?;
 // ...later:
 handle.cancel();
 ```
 
-### Acknowledgement Helpers
+For stateful long-lived workers, `Channel::basic_consume_with` accepts an
+`impl DeliveryHandler` and is available as a lower-level building block.
+
+### Acknowledging Deliveries
+
+`Delivery` carries a cheap, cloneable handle to its channel, so the ack
+methods live directly on the message: no delivery-tag juggling, no need to
+keep a `Channel` reference around.
 
 ```rust
-// Acknowledge a single delivery
-ch.ack(delivery.delivery_tag).await?;
-// Acknowledge all deliveries up to and including this tag
-ch.ack_multiple(delivery.delivery_tag).await?;
-
-// Reject and requeue
-ch.reject(delivery.delivery_tag).await?;
-// Reject and discard (dead-letter if configured)
-ch.discard(delivery.delivery_tag).await?;
-// Negatively acknowledge and requeue multiple deliveries
-ch.nack_multiple(delivery.delivery_tag).await?;
+delivery.ack().await?;             // single ack
+delivery.ack_multiple().await?;    // ack everything up to and including this tag
+delivery.nack().await?;            // nack and requeue
+delivery.reject().await?;          // reject and requeue
+delivery.discard().await?;         // reject and drop (dead-letter if configured)
 ```
 
-`basic_ack`, `basic_nack`, and `basic_reject` are available when you need
-full control over the `multiple` and `requeue` flags.
+See the [RabbitMQ doc guide on consumer
+acknowledgements](https://www.rabbitmq.com/docs/confirms) for the semantics.
 
 ### Multiple Consumers per Channel
 
-Use `recv_delivery_for` to receive from a specific consumer:
+Each `Queue::subscribe` call returns an independent `Consumer`. A channel can
+host any number of them concurrently:
 
 ```rust
-let tag_a = ch.consume_with_manual_acks("queue-1", "consumer-a").await?;
-let tag_b = ch.consume_with_manual_acks("queue-2", "consumer-b").await?;
-
-let delivery = ch.recv_delivery_for(&tag_a).await?;
+let mut consumer_a = ch.queue("queue-1").subscribe(SubscribeOptions::manual_ack()).await?;
+let mut consumer_b = ch.queue("queue-2").subscribe(SubscribeOptions::manual_ack()).await?;
 ```
 
 ### Declaring Queues
@@ -473,13 +477,14 @@ ch.queue_declare("custom", QueueDeclareOptions::durable()
 ### Consuming from Streams
 
 ```rust
-use bunny_rs::ConsumeOptions;
+use bunny_rs::{ConsumeOptions, SubscribeOptions};
 use bunny_rs::options::StreamOffset;
 
-ch.basic_consume("my-stream", "my-consumer",
-    ConsumeOptions::default()
-        .stream_offset(StreamOffset::First)
-).await?;
+let mut sub = ch.queue("my-stream")
+    .subscribe(SubscribeOptions::manual_ack().prefetch(100).with_consume(
+        ConsumeOptions::default().stream_offset(StreamOffset::First),
+    ))
+    .await?;
 ```
 
 Other offset types:
@@ -519,23 +524,34 @@ ch.delayed_queue("retry-tasks", QueueDeclareOptions::default()
 
 Requires the `rabbitmq_jms` plugin ([Tanzu RabbitMQ](https://docs.vmware.com/en/VMware-RabbitMQ/index.html)).
 
+`x-selector-fields` opts each queue in to the message metadata that may be
+referenced by [JMS message
+selectors](https://jakarta.ee/specifications/messaging/3.1/jakarta-messaging-spec-3.1#message-selector).
+Field names are either well-known JMS headers (`JMSDeliveryMode`,
+`JMSPriority`, `JMSMessageID`, `JMSTimestamp`, `JMSCorrelationID`, `JMSType`,
+`JMSXUserID`, `JMSXGroupID`, `JMSXGroupSeq`) which map to AMQP message
+properties, or arbitrary application property names. Use `*` to allow all
+application properties.
+
 ```rust
 use bunny_rs::QueueDeclareOptions;
 
 ch.jms_queue("jms-orders", QueueDeclareOptions::default()
-    .selector_fields(&["priority", "region"])
+    .selector_fields(&["JMSPriority", "region"])
     .delivery_limit(3)
 ).await?;
 ```
 
-With a JMS message selector on the consumer:
+With a JMS message selector on the consumer (subset of SQL92):
 
 ```rust
-use bunny_rs::ConsumeOptions;
+use bunny_rs::{ConsumeOptions, SubscribeOptions};
 
-ch.basic_consume("jms-orders", "my-consumer",
-    ConsumeOptions::default().jms_selector("priority > 5 AND region = 'EU'")
-).await?;
+let mut sub = ch.queue("jms-orders")
+    .subscribe(SubscribeOptions::manual_ack().with_consume(
+        ConsumeOptions::default().jms_selector("JMSPriority > 4 AND region = 'EU'"),
+    ))
+    .await?;
 ```
 
 ### TLS

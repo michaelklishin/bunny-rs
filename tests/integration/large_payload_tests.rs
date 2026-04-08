@@ -2,8 +2,18 @@
 // Licensed under the Apache License 2.0 and MIT licenses.
 // See LICENSE-APACHE and LICENSE-MIT in the repository root for details.
 
+use std::time::Duration;
+
 use crate::test_helpers::connect;
-use bunny_rs::options::{ConsumeOptions, PublishOptions, QueueDeclareOptions, QueueDeleteOptions};
+use bunny_rs::SubscribeOptions;
+use bunny_rs::options::{PublishOptions, QueueDeclareOptions, QueueDeleteOptions};
+
+async fn next_delivery(sub: &mut bunny_rs::Consumer) -> bunny_rs::Delivery {
+    tokio::time::timeout(Duration::from_secs(5), sub.recv())
+        .await
+        .expect("consumer stalled")
+        .expect("consumer closed")
+}
 
 #[tokio::test]
 async fn test_publish_256kb_payload() {
@@ -26,19 +36,18 @@ async fn test_publish_256kb_payload() {
     .await
     .unwrap();
 
-    ch.basic_consume(
-        "bunny-rs.test.large-256k",
-        "large-consumer",
-        ConsumeOptions::default(),
-    )
-    .await
-    .unwrap();
+    let mut sub = ch
+        .queue("bunny-rs.test.large-256k")
+        .subscribe(SubscribeOptions::manual_ack().consumer_tag("large-consumer"))
+        .await
+        .unwrap();
 
-    let delivery = ch.recv_delivery().await.unwrap().unwrap();
+    let delivery = next_delivery(&mut sub).await;
     assert_eq!(delivery.body.len(), 256 * 1024);
     assert!(delivery.body.iter().all(|&b| b == 0xAB));
-    ch.basic_ack(delivery.delivery_tag, false).await.unwrap();
+    delivery.ack().await.unwrap();
 
+    sub.cancel().await.unwrap();
     ch.queue_delete("bunny-rs.test.large-256k", QueueDeleteOptions::default())
         .await
         .unwrap();
@@ -66,19 +75,18 @@ async fn test_publish_1mb_payload() {
     .await
     .unwrap();
 
-    ch.basic_consume(
-        "bunny-rs.test.large-1m",
-        "1m-consumer",
-        ConsumeOptions::default(),
-    )
-    .await
-    .unwrap();
+    let mut sub = ch
+        .queue("bunny-rs.test.large-1m")
+        .subscribe(SubscribeOptions::manual_ack().consumer_tag("1m-consumer"))
+        .await
+        .unwrap();
 
-    let delivery = ch.recv_delivery().await.unwrap().unwrap();
+    let delivery = next_delivery(&mut sub).await;
     assert_eq!(delivery.body.len(), 1024 * 1024);
     assert!(delivery.body.iter().all(|&b| b == 0xCD));
-    ch.basic_ack(delivery.delivery_tag, false).await.unwrap();
+    delivery.ack().await.unwrap();
 
+    sub.cancel().await.unwrap();
     ch.queue_delete("bunny-rs.test.large-1m", QueueDeleteOptions::default())
         .await
         .unwrap();
@@ -96,7 +104,7 @@ async fn test_publish_exactly_frame_max_minus_overhead() {
         .unwrap();
     ch.queue_purge("bunny-rs.test.exact-frame").await.unwrap();
 
-    // exactly frame_max - 8 bytes = single body frame at max size
+    // Exactly frame_max - 8 bytes = single body frame at max size
     let body = vec![0x42u8; 131072 - 8];
     ch.basic_publish(
         "",
@@ -107,18 +115,17 @@ async fn test_publish_exactly_frame_max_minus_overhead() {
     .await
     .unwrap();
 
-    ch.basic_consume(
-        "bunny-rs.test.exact-frame",
-        "exact-consumer",
-        ConsumeOptions::default(),
-    )
-    .await
-    .unwrap();
+    let mut sub = ch
+        .queue("bunny-rs.test.exact-frame")
+        .subscribe(SubscribeOptions::manual_ack().consumer_tag("exact-consumer"))
+        .await
+        .unwrap();
 
-    let delivery = ch.recv_delivery().await.unwrap().unwrap();
+    let delivery = next_delivery(&mut sub).await;
     assert_eq!(delivery.body.len(), 131072 - 8);
-    ch.basic_ack(delivery.delivery_tag, false).await.unwrap();
+    delivery.ack().await.unwrap();
 
+    sub.cancel().await.unwrap();
     ch.queue_delete("bunny-rs.test.exact-frame", QueueDeleteOptions::default())
         .await
         .unwrap();

@@ -2,9 +2,19 @@
 // Licensed under the Apache License 2.0 and MIT licenses.
 // See LICENSE-APACHE and LICENSE-MIT in the repository root for details.
 
+use std::time::Duration;
+
 use crate::test_helpers::connect;
-use bunny_rs::options::{ConsumeOptions, PublishOptions, QueueDeclareOptions, QueueDeleteOptions};
+use bunny_rs::SubscribeOptions;
+use bunny_rs::options::{PublishOptions, QueueDeclareOptions, QueueDeleteOptions};
 use bunny_rs::protocol::properties::BasicProperties;
+
+async fn next_delivery(sub: &mut bunny_rs::Consumer) -> bunny_rs::Delivery {
+    tokio::time::timeout(Duration::from_secs(5), sub.recv())
+        .await
+        .expect("consumer stalled")
+        .expect("consumer closed")
+}
 
 #[tokio::test]
 async fn test_publish_to_default_exchange() {
@@ -44,11 +54,8 @@ async fn test_publish_and_consume() {
         .queue_declare("bunny-rs.test.pub-consume", QueueDeclareOptions::default())
         .await
         .unwrap();
-
-    // Purge any leftover messages
     ch.queue_purge("bunny-rs.test.pub-consume").await.unwrap();
 
-    // Publish a message
     ch.basic_publish(
         "",
         "bunny-rs.test.pub-consume",
@@ -63,19 +70,14 @@ async fn test_publish_and_consume() {
     .await
     .unwrap();
 
-    // Start consuming
-    let tag = ch
-        .basic_consume(
-            "bunny-rs.test.pub-consume",
-            "test-consumer",
-            ConsumeOptions::default(),
-        )
+    let mut sub = ch
+        .queue("bunny-rs.test.pub-consume")
+        .subscribe(SubscribeOptions::manual_ack().consumer_tag("test-consumer"))
         .await
         .unwrap();
-    assert_eq!(tag.as_str(), "test-consumer");
+    assert_eq!(sub.consumer_tag(), "test-consumer");
 
-    // Receive the delivery
-    let delivery = ch.recv_delivery().await.unwrap().unwrap();
+    let delivery = next_delivery(&mut sub).await;
     assert_eq!(delivery.body.as_ref(), b"{\"key\": \"value\"}");
     assert_eq!(delivery.exchange.as_str(), "");
     assert_eq!(delivery.routing_key.as_str(), "bunny-rs.test.pub-consume");
@@ -86,10 +88,9 @@ async fn test_publish_and_consume() {
     assert_eq!(delivery.properties().get_message_id(), Some("test-msg-1"));
     assert!(!delivery.redelivered);
 
-    // Acknowledge
-    ch.basic_ack(delivery.delivery_tag, false).await.unwrap();
+    delivery.ack().await.unwrap();
+    sub.cancel().await.unwrap();
 
-    // Cleanup
     ch.queue_delete("bunny-rs.test.pub-consume", QueueDeleteOptions::default())
         .await
         .unwrap();
@@ -116,29 +117,22 @@ async fn test_publish_and_nack_with_requeue() {
     .await
     .unwrap();
 
-    ch.basic_consume(
-        "bunny-rs.test.nack",
-        "nack-consumer",
-        ConsumeOptions::default(),
-    )
-    .await
-    .unwrap();
-
-    let delivery = ch.recv_delivery().await.unwrap().unwrap();
-    assert_eq!(delivery.body.as_ref(), b"nack-me");
-
-    // Nack with requeue
-    ch.basic_nack(delivery.delivery_tag, false, true)
+    let mut sub = ch
+        .queue("bunny-rs.test.nack")
+        .subscribe(SubscribeOptions::manual_ack().consumer_tag("nack-consumer"))
         .await
         .unwrap();
 
-    // Receive the redelivered message
-    let delivery2 = ch.recv_delivery().await.unwrap().unwrap();
+    let delivery = next_delivery(&mut sub).await;
+    assert_eq!(delivery.body.as_ref(), b"nack-me");
+    delivery.nack().await.unwrap();
+
+    let delivery2 = next_delivery(&mut sub).await;
     assert_eq!(delivery2.body.as_ref(), b"nack-me");
     assert!(delivery2.redelivered);
+    delivery2.ack().await.unwrap();
 
-    ch.basic_ack(delivery2.delivery_tag, false).await.unwrap();
-
+    sub.cancel().await.unwrap();
     ch.queue_delete("bunny-rs.test.nack", QueueDeleteOptions::default())
         .await
         .unwrap();
@@ -168,21 +162,20 @@ async fn test_publish_multiple_messages() {
         .unwrap();
     }
 
-    ch.basic_consume(
-        "bunny-rs.test.multi",
-        "multi-consumer",
-        ConsumeOptions::default(),
-    )
-    .await
-    .unwrap();
+    let mut sub = ch
+        .queue("bunny-rs.test.multi")
+        .subscribe(SubscribeOptions::manual_ack().consumer_tag("multi-consumer"))
+        .await
+        .unwrap();
 
     for i in 0..5 {
-        let delivery = ch.recv_delivery().await.unwrap().unwrap();
+        let delivery = next_delivery(&mut sub).await;
         let expected = format!("message-{i}");
         assert_eq!(delivery.body.as_ref(), expected.as_bytes());
-        ch.basic_ack(delivery.delivery_tag, false).await.unwrap();
+        delivery.ack().await.unwrap();
     }
 
+    sub.cancel().await.unwrap();
     ch.queue_delete("bunny-rs.test.multi", QueueDeleteOptions::default())
         .await
         .unwrap();
@@ -209,17 +202,16 @@ async fn test_publish_empty_body() {
     .await
     .unwrap();
 
-    ch.basic_consume("bunny-rs.test.empty-body", "empty-consumer", {
-        let mut opts = ConsumeOptions::default();
-        opts.no_ack = true;
-        opts
-    })
-    .await
-    .unwrap();
+    let mut sub = ch
+        .queue("bunny-rs.test.empty-body")
+        .subscribe(SubscribeOptions::auto_ack().consumer_tag("empty-consumer"))
+        .await
+        .unwrap();
 
-    let delivery = ch.recv_delivery().await.unwrap().unwrap();
+    let delivery = next_delivery(&mut sub).await;
     assert!(delivery.body.is_empty());
 
+    sub.cancel().await.unwrap();
     ch.queue_delete("bunny-rs.test.empty-body", QueueDeleteOptions::default())
         .await
         .unwrap();

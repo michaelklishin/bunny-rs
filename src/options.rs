@@ -331,7 +331,15 @@ impl QueueDeclareOptions {
 
     // JMS queue x-arguments (Tanzu RabbitMQ)
 
-    /// `x-selector-fields` for JMS selectors (e.g. `&["priority", "region"]`).
+    /// `x-selector-fields`: opts a JMS queue in to the message metadata that
+    /// may be referenced by [JMS message
+    /// selectors](https://jakarta.ee/specifications/messaging/3.1/jakarta-messaging-spec-3.1#message-selector).
+    ///
+    /// Each entry is either a well-known JMS header name (`JMSDeliveryMode`,
+    /// `JMSPriority`, `JMSMessageID`, `JMSTimestamp`, `JMSCorrelationID`,
+    /// `JMSType`, `JMSXUserID`, `JMSXGroupID`, `JMSXGroupSeq`), an
+    /// application-specific property name, or `*` to allow all application
+    /// properties.
     pub fn selector_fields(mut self, fields: &[&str]) -> Self {
         let arr: Vec<FieldValue> = fields.iter().map(|f| FieldValue::from(*f)).collect();
         self.arguments

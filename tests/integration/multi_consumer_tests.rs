@@ -2,8 +2,18 @@
 // Licensed under the Apache License 2.0 and MIT licenses.
 // See LICENSE-APACHE and LICENSE-MIT in the repository root for details.
 
+use std::time::Duration;
+
 use crate::test_helpers::connect;
+use bunny_rs::SubscribeOptions;
 use bunny_rs::options::{QueueDeclareOptions, QueueDeleteOptions};
+
+async fn next_delivery(sub: &mut bunny_rs::Consumer) -> bunny_rs::Delivery {
+    tokio::time::timeout(Duration::from_secs(5), sub.recv())
+        .await
+        .expect("consumer stalled")
+        .expect("consumer closed")
+}
 
 #[tokio::test]
 async fn test_two_consumers_same_queue_round_robin() {
@@ -16,16 +26,17 @@ async fn test_two_consumers_same_queue_round_robin() {
     ch.queue_purge("bunny-rs.test.mc-rr").await.unwrap();
     ch.basic_qos(1).await.unwrap();
 
-    let tag1 = ch
-        .consume_with_manual_acks("bunny-rs.test.mc-rr", "consumer-a")
+    let mut sub_a = ch
+        .queue("bunny-rs.test.mc-rr")
+        .subscribe(SubscribeOptions::manual_ack().consumer_tag("consumer-a"))
         .await
         .unwrap();
-    let tag2 = ch
-        .consume_with_manual_acks("bunny-rs.test.mc-rr", "consumer-b")
+    let mut sub_b = ch
+        .queue("bunny-rs.test.mc-rr")
+        .subscribe(SubscribeOptions::manual_ack().consumer_tag("consumer-b"))
         .await
         .unwrap();
 
-    // publish 2 messages
     ch.publish("", "bunny-rs.test.mc-rr", b"msg-1")
         .await
         .unwrap();
@@ -33,18 +44,16 @@ async fn test_two_consumers_same_queue_round_robin() {
         .await
         .unwrap();
 
-    // each consumer should get one message (round-robin)
-    let d1 = ch.recv_delivery_for(&tag1).await.unwrap().unwrap();
-    ch.basic_ack(d1.delivery_tag, false).await.unwrap();
+    // Each consumer should get one message (round-robin)
+    let d_a = next_delivery(&mut sub_a).await;
+    d_a.ack().await.unwrap();
+    let d_b = next_delivery(&mut sub_b).await;
+    d_b.ack().await.unwrap();
 
-    let d2 = ch.recv_delivery_for(&tag2).await.unwrap().unwrap();
-    ch.basic_ack(d2.delivery_tag, false).await.unwrap();
+    assert_ne!(d_a.body.as_ref(), d_b.body.as_ref());
 
-    // both messages received, different bodies
-    assert_ne!(d1.body.as_ref(), d2.body.as_ref());
-
-    ch.basic_cancel(&tag1).await.unwrap();
-    ch.basic_cancel(&tag2).await.unwrap();
+    sub_a.cancel().await.unwrap();
+    sub_b.cancel().await.unwrap();
     ch.queue_delete("bunny-rs.test.mc-rr", QueueDeleteOptions::default())
         .await
         .unwrap();
@@ -66,12 +75,14 @@ async fn test_two_consumers_different_queues() {
     ch.queue_purge("bunny-rs.test.mc-q1").await.unwrap();
     ch.queue_purge("bunny-rs.test.mc-q2").await.unwrap();
 
-    let tag1 = ch
-        .consume_with_manual_acks("bunny-rs.test.mc-q1", "c-q1")
+    let mut sub1 = ch
+        .queue("bunny-rs.test.mc-q1")
+        .subscribe(SubscribeOptions::manual_ack().consumer_tag("c-q1"))
         .await
         .unwrap();
-    let tag2 = ch
-        .consume_with_manual_acks("bunny-rs.test.mc-q2", "c-q2")
+    let mut sub2 = ch
+        .queue("bunny-rs.test.mc-q2")
+        .subscribe(SubscribeOptions::manual_ack().consumer_tag("c-q2"))
         .await
         .unwrap();
 
@@ -82,16 +93,16 @@ async fn test_two_consumers_different_queues() {
         .await
         .unwrap();
 
-    let d1 = ch.recv_delivery_for(&tag1).await.unwrap().unwrap();
+    let d1 = next_delivery(&mut sub1).await;
     assert_eq!(d1.body.as_ref(), b"for-q1");
-    ch.basic_ack(d1.delivery_tag, false).await.unwrap();
+    d1.ack().await.unwrap();
 
-    let d2 = ch.recv_delivery_for(&tag2).await.unwrap().unwrap();
+    let d2 = next_delivery(&mut sub2).await;
     assert_eq!(d2.body.as_ref(), b"for-q2");
-    ch.basic_ack(d2.delivery_tag, false).await.unwrap();
+    d2.ack().await.unwrap();
 
-    ch.basic_cancel(&tag1).await.unwrap();
-    ch.basic_cancel(&tag2).await.unwrap();
+    sub1.cancel().await.unwrap();
+    sub2.cancel().await.unwrap();
     ch.queue_delete("bunny-rs.test.mc-q1", QueueDeleteOptions::default())
         .await
         .unwrap();
@@ -112,27 +123,28 @@ async fn test_cancel_one_consumer_other_continues() {
         .unwrap();
     ch.queue_purge("bunny-rs.test.mc-cancel").await.unwrap();
 
-    let tag1 = ch
-        .consume_with_manual_acks("bunny-rs.test.mc-cancel", "stays")
+    let mut sub_stays = ch
+        .queue("bunny-rs.test.mc-cancel")
+        .subscribe(SubscribeOptions::manual_ack().consumer_tag("stays"))
         .await
         .unwrap();
-    let tag2 = ch
-        .consume_with_manual_acks("bunny-rs.test.mc-cancel", "goes")
+    let sub_goes = ch
+        .queue("bunny-rs.test.mc-cancel")
+        .subscribe(SubscribeOptions::manual_ack().consumer_tag("goes"))
         .await
         .unwrap();
 
-    ch.basic_cancel(&tag2).await.unwrap();
+    sub_goes.cancel().await.unwrap();
 
-    // publish after cancel — only "stays" should receive
     ch.publish("", "bunny-rs.test.mc-cancel", b"after-cancel")
         .await
         .unwrap();
 
-    let d = ch.recv_delivery_for(&tag1).await.unwrap().unwrap();
+    let d = next_delivery(&mut sub_stays).await;
     assert_eq!(d.body.as_ref(), b"after-cancel");
-    ch.basic_ack(d.delivery_tag, false).await.unwrap();
+    d.ack().await.unwrap();
 
-    ch.basic_cancel(&tag1).await.unwrap();
+    sub_stays.cancel().await.unwrap();
     ch.queue_delete("bunny-rs.test.mc-cancel", QueueDeleteOptions::default())
         .await
         .unwrap();

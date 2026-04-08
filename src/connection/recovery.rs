@@ -208,8 +208,16 @@ async fn replay_topology(
             nowait: false,
             arguments: q.opts.arguments().clone(),
         }));
-        let response =
-            send_and_receive(transport, &mut codec, &mut buf, &mut read_buf, 1, method).await?;
+        let response = send_and_receive_matching(
+            transport,
+            &mut codec,
+            &mut buf,
+            &mut read_buf,
+            1,
+            method,
+            |m| matches!(m, Method::QueueDeclareOk(_)),
+        )
+        .await?;
         if let Method::QueueDeclareOk(ref args) = response
             && q.server_named
             && args.queue != q.name
@@ -276,7 +284,7 @@ async fn replay_topology(
         .await?;
     }
 
-    // Re-register consumers
+    // Re-register consumers.
     for c in &mut topology.consumers {
         let method = Method::BasicConsume(Box::new(BasicConsumeArgs {
             queue: c.queue.clone(),
@@ -287,8 +295,16 @@ async fn replay_topology(
             nowait: false,
             arguments: c.opts.arguments().clone(),
         }));
-        let response =
-            send_and_receive(transport, &mut codec, &mut buf, &mut read_buf, 1, method).await?;
+        let response = send_and_receive_matching(
+            transport,
+            &mut codec,
+            &mut buf,
+            &mut read_buf,
+            1,
+            method,
+            |m| matches!(m, Method::BasicConsumeOk(_)),
+        )
+        .await?;
         if let Method::BasicConsumeOk(ref args) = response
             && args.consumer_tag != c.consumer_tag
         {
@@ -322,14 +338,19 @@ async fn replay_topology(
     Ok(changes)
 }
 
-/// Send one method, return the response.
-async fn send_and_receive(
+/// Send one method, then read frames until a method matching `expect` is
+/// observed. Method frames that do not match, and all header/body frames, are
+/// discarded. Used for steps where the broker may interleave unrelated frames,
+/// for example a `basic.deliver` arriving on the heels of a replayed
+/// `basic.consume`.
+async fn send_and_receive_matching(
     transport: &mut Transport,
     codec: &mut AmqpCodec,
     write_buf: &mut BytesMut,
     read_buf: &mut BytesMut,
     channel: u16,
     method: Method,
+    expect: impl Fn(&Method) -> bool,
 ) -> Result<Method, BoxError> {
     let frame = Frame::Method(channel, Box::new(method));
     codec.encode(frame, write_buf)?;
@@ -340,7 +361,10 @@ async fn send_and_receive(
     loop {
         if let Some(frame) = codec.decode(read_buf)? {
             if let Frame::Method(_, m) = frame {
-                return Ok(*m);
+                if expect(&m) {
+                    return Ok(*m);
+                }
+                tracing::debug!(method = ?m, "discarding non-matching method during recovery");
             }
             continue;
         }
@@ -362,10 +386,9 @@ async fn send_and_expect(
     method: Method,
     expect: impl Fn(&Method) -> bool,
 ) -> Result<(), BoxError> {
-    let response = send_and_receive(transport, codec, write_buf, read_buf, channel, method).await?;
-    if expect(&response) {
-        Ok(())
-    } else {
-        Err(format!("unexpected response during recovery: {:?}", response).into())
-    }
+    send_and_receive_matching(
+        transport, codec, write_buf, read_buf, channel, method, expect,
+    )
+    .await?;
+    Ok(())
 }
