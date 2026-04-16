@@ -19,11 +19,11 @@ use std::time::{Duration, Instant};
 use bytes::{Bytes, BytesMut};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::{Mutex, broadcast, mpsc};
+use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
 use tokio_util::codec::Decoder;
 
 use crate::channel::Channel;
-use crate::credentials::Password;
+use crate::credentials::{CredentialsProvider, Password};
 use crate::errors::ProtocolError;
 use crate::protocol::codec::AmqpCodec;
 use crate::protocol::constants::*;
@@ -95,6 +95,12 @@ pub struct ConnectionOptions {
     /// `capabilities` which is merged at the table level.
     pub client_properties: Option<FieldTable>,
     pub recovery: recovery::RecoveryConfig,
+    /// Optional credentials provider for automatic token refresh.
+    /// When set, credentials from this provider are used for the initial
+    /// handshake. If the returned credentials have a finite `valid_until`,
+    /// a background loop periodically refreshes them via
+    /// `connection.update-secret`.
+    pub credentials_provider: Option<Arc<dyn CredentialsProvider>>,
     #[cfg(feature = "tls")]
     pub tls: Option<crate::transport::tls::TlsOptions>,
 }
@@ -115,6 +121,7 @@ impl Default for ConnectionOptions {
             auth_mechanism: AuthMechanism::Plain,
             client_properties: None,
             recovery: recovery::RecoveryConfig::default(),
+            credentials_provider: None,
             #[cfg(feature = "tls")]
             tls: None,
         }
@@ -307,8 +314,16 @@ pub enum ConnectionEvent {
     RecoveryFailed(String),
     Blocked(String),
     Unblocked,
-    QueueNameChanged { old: String, new: String },
-    ConsumerTagChanged { old: String, new: String },
+    QueueNameChanged {
+        old: String,
+        new: String,
+    },
+    ConsumerTagChanged {
+        old: String,
+        new: String,
+    },
+    /// The background refresh loop successfully updated the connection secret.
+    CredentialRefreshed,
 }
 
 /// Controls which topology entities are replayed during recovery.
@@ -345,6 +360,8 @@ struct ConnectionInner {
     recovery_filter: Mutex<Option<TopologyRecoveryFilter>>,
     event_tx: broadcast::Sender<ConnectionEvent>,
     last_sent_activity: AtomicU64,
+    /// Signalled when `connection.update-secret-ok` arrives.
+    update_secret_ok_tx: Mutex<Option<oneshot::Sender<()>>>,
     /// Incremented on each recovery so that writer and heartbeat loops
     /// from a previous connection notice the change and exit.
     connection_recovery_epoch: AtomicU64,
@@ -357,12 +374,22 @@ pub struct Connection {
 }
 
 impl Connection {
-    pub async fn open(opts: ConnectionOptions) -> Result<Self, ConnectionError> {
+    pub async fn open(mut opts: ConnectionOptions) -> Result<Self, ConnectionError> {
+        let mut credential_ttl = None;
+        if let Some(ref provider) = opts.credentials_provider {
+            let creds = provider
+                .credentials()
+                .await
+                .map_err(|e| ConnectionError::Io(std::io::Error::other(e)))?;
+            opts.username = creds.username;
+            opts.password = creds.password;
+            credential_ttl = creds.valid_until;
+        }
         let resolver = endpoint::AddressResolver::from_endpoints(opts.effective_endpoints());
         // Initial connection: resolve but do NOT shuffle
         let endpoints = resolver.resolve().await;
         let transport = Self::connect_to_first(&endpoints, &opts).await?;
-        Self::open_with_transport(transport, resolver, opts).await
+        Self::open_with_transport(transport, resolver, opts, credential_ttl).await
     }
 
     pub async fn from_uri(uri: &str) -> Result<Self, ConnectionError> {
@@ -421,6 +448,7 @@ impl Connection {
         mut transport: Transport,
         resolver: endpoint::AddressResolver,
         opts: ConnectionOptions,
+        credential_ttl: Option<Duration>,
     ) -> Result<Self, ConnectionError> {
         transport.write_all(PROTOCOL_HEADER).await?;
         transport.flush().await?;
@@ -452,6 +480,7 @@ impl Connection {
             recovery_filter: Mutex::new(None),
             event_tx: broadcast::channel(16).0,
             last_sent_activity: AtomicU64::new(monotonic_millis()),
+            update_secret_ok_tx: Mutex::new(None),
             connection_recovery_epoch: AtomicU64::new(0),
         });
 
@@ -479,6 +508,14 @@ impl Connection {
             let interval_secs = negotiated.heartbeat as u64;
             tokio::spawn(async move {
                 heartbeat_loop(hb_inner, interval_secs, generation).await;
+            });
+        }
+
+        if let (Some(ttl), Some(provider)) = (credential_ttl, &inner.opts.credentials_provider) {
+            let cr_inner = inner.clone();
+            let cr_provider = provider.clone();
+            tokio::spawn(async move {
+                credential_refresh_loop(cr_inner, cr_provider, ttl, generation).await;
             });
         }
 
@@ -594,14 +631,15 @@ impl Connection {
         ))
     }
 
-    /// Send `connection.update-secret` to the broker (e.g. after an OAuth 2 token refresh).
-    ///
-    /// The server responds with `connection.update-secret-ok` which is handled
-    /// by the reader loop.
+    /// Send `connection.update-secret` to the broker (e.g. after an OAuth 2 token refresh)
+    /// and wait for the `connection.update-secret-ok` confirmation.
     pub async fn update_secret(&self, secret: &str, reason: &str) -> Result<(), ConnectionError> {
         if !self.is_open() {
             return Err(ConnectionError::NotConnected);
         }
+
+        let (tx, rx) = oneshot::channel();
+        *self.inner.update_secret_ok_tx.lock().await = Some(tx);
 
         let frame = Frame::Method(
             0,
@@ -621,7 +659,10 @@ impl Connection {
             .await
             .map_err(|_| ConnectionError::NotConnected)?;
 
-        Ok(())
+        tokio::time::timeout(Duration::from_secs(30), rx)
+            .await
+            .map_err(|_| ConnectionError::Timeout)?
+            .map_err(|_| ConnectionError::NotConnected)
     }
 
     pub async fn close(&self) -> Result<(), ConnectionError> {
@@ -860,6 +901,25 @@ async fn reader_loop_impl(
                     heartbeat_loop(hb_inner, interval_secs, generation).await;
                 });
             }
+
+            // Restart credential refresh loop for the recovered connection
+            if let Some(ref provider) = inner.opts.credentials_provider {
+                match provider.credentials().await {
+                    Ok(creds) => {
+                        if let Some(ttl) = creds.valid_until {
+                            let cr_inner = inner.clone();
+                            let cr_provider = provider.clone();
+                            tokio::spawn(async move {
+                                credential_refresh_loop(cr_inner, cr_provider, ttl, generation)
+                                    .await;
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "credentials provider failed after recovery, refresh loop not restarted");
+                    }
+                }
+            }
         }
         None => {
             tracing::error!("recovery failed, connection permanently closed");
@@ -935,6 +995,9 @@ async fn dispatch_frame(inner: &ConnectionInner, frame: Frame) {
                     .send(WriterCommand::SendFrame(close_ok))
                     .await;
                 inner.is_open.store(false, Ordering::Release);
+                // Wake any pending update_secret caller so it gets
+                // NotConnected instead of waiting for the timeout.
+                drop(inner.update_secret_ok_tx.lock().await.take());
             }
             Method::ConnectionCloseOk => {
                 inner.is_open.store(false, Ordering::Release);
@@ -950,6 +1013,9 @@ async fn dispatch_frame(inner: &ConnectionInner, frame: Frame) {
             }
             Method::ConnectionUpdateSecretOk => {
                 tracing::debug!("connection.update-secret-ok received");
+                if let Some(tx) = inner.update_secret_ok_tx.lock().await.take() {
+                    let _ = tx.send(());
+                }
             }
             _ => {}
         },
@@ -988,6 +1054,75 @@ async fn heartbeat_loop(inner: Arc<ConnectionInner>, interval_secs: u64, generat
                 .await
                 .send(WriterCommand::SendFrame(Frame::Heartbeat))
                 .await;
+        }
+    }
+}
+
+async fn credential_refresh_loop(
+    inner: Arc<ConnectionInner>,
+    provider: Arc<dyn CredentialsProvider>,
+    initial_ttl: Duration,
+    generation: u64,
+) {
+    let mut ttl = initial_ttl;
+
+    loop {
+        // Refresh at 80% of TTL (matching the Java client), floor of 1 second.
+        let delay = ttl.mul_f64(0.8).max(Duration::from_secs(1));
+        tokio::time::sleep(delay).await;
+
+        if inner.connection_recovery_epoch.load(Ordering::Relaxed) != generation {
+            break;
+        }
+        if !inner.is_open.load(Ordering::Acquire) {
+            break;
+        }
+
+        // Up to 3 attempts with 1-second delays between retries.
+        let mut succeeded = false;
+        for attempt in 0u32..3 {
+            if attempt > 0 {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+
+            let creds = match provider.credentials().await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(attempt, error = %e, "credentials provider failed");
+                    continue;
+                }
+            };
+
+            let new_ttl = creds.valid_until;
+            let conn = Connection {
+                inner: inner.clone(),
+            };
+            match conn
+                .update_secret(creds.password.as_str(), "credential refresh")
+                .await
+            {
+                Ok(()) => {
+                    tracing::debug!("credential refresh succeeded");
+                    let _ = inner.event_tx.send(ConnectionEvent::CredentialRefreshed);
+                    match new_ttl {
+                        Some(t) => ttl = t,
+                        None => {
+                            // Credentials no longer expire; stop refreshing.
+                            tracing::info!("credentials no longer expire, stopping refresh loop");
+                            return;
+                        }
+                    }
+                    succeeded = true;
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!(attempt, error = %e, "update_secret failed");
+                }
+            }
+        }
+
+        if !succeeded {
+            tracing::error!("credential refresh failed after 3 attempts");
         }
     }
 }

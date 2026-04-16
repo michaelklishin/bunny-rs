@@ -1,0 +1,222 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
+name: CI
+
+on:
+  push:
+    branches:
+      - "main"
+    paths:
+      - ".github/workflows/ci.yaml"
+      - ".config/nextest.toml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - 'src/**'
+      - "tests/**"
+  pull_request: {}
+
+env:
+  RUSTFLAGS: -D warnings
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    name: Lint
+    strategy:
+      matrix:
+        rust-version:
+          - stable
+          - beta
+        runner:
+          - "ubuntu-22.04"
+          - "ubuntu-24.04"
+          - "ubuntu-24.04-arm"
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ matrix.rust-version }}
+          components: rustfmt, clippy
+
+      - name: Lint (clippy)
+        run: cargo clippy --all-features
+
+      - name: Lint (rustfmt)
+        run: cargo fmt --all --check
+
+  build:
+    name: Build and test
+    strategy:
+      fail-fast: false
+      matrix:
+        rabbitmq-series:
+          - "4.0"
+          - "4.1"
+          - "4.2"
+        rust-version:
+          - stable
+          - beta
+        runner:
+          - "ubuntu-22.04"
+          - "ubuntu-24.04"
+          - "ubuntu-24.04-arm"
+    runs-on: ${{ matrix.runner }}
+
+    services:
+      rabbitmq:
+        image: rabbitmq:${{ matrix.rabbitmq-series }}-management
+        ports:
+          - 5672:5672
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ matrix.rust-version }}
+
+      - uses: taiki-e/install-action@nextest
+
+      - name: Wait for RabbitMQ to start
+        run: |
+          for i in $(seq 1 30); do
+            if docker exec ${{ job.services.rabbitmq.id }} rabbitmqctl await_startup --timeout 60; then
+              echo "RabbitMQ is ready"
+              exit 0
+            fi
+            echo "Waiting for container... ($i/30)"
+            sleep 2
+          done
+          echo "RabbitMQ failed to start. Container logs:"
+          docker logs ${{ job.services.rabbitmq.id }}
+          exit 1
+
+      - name: Run tests
+        run: cargo nextest run --all-features --no-fail-fast
+
+  tls-tests:
+    name: TLS tests
+    strategy:
+      fail-fast: false
+      matrix:
+        rabbitmq-series:
+          - "4.1"
+          - "4.2"
+        rust-version:
+          - stable
+        runner:
+          - "ubuntu-22.04"
+          - "ubuntu-24.04"
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ matrix.rust-version }}
+
+      - uses: taiki-e/install-action@nextest
+
+      - name: Clone tls-gen
+        run: git clone --depth 1 https://github.com/rabbitmq/tls-gen.git target/tls-gen
+
+      - name: Generate TLS certificates
+        run: |
+          cd target/tls-gen/basic
+          make CN=localhost
+
+      - name: Copy certificates
+        run: |
+          mkdir -p tests/tls/certs
+          cp target/tls-gen/basic/result/ca_certificate.pem tests/tls/certs/
+          cp target/tls-gen/basic/result/server_localhost_certificate.pem tests/tls/certs/server_certificate.pem
+          cp target/tls-gen/basic/result/server_localhost_key.pem tests/tls/certs/server_key.pem
+          cp target/tls-gen/basic/result/client_localhost_certificate.pem tests/tls/certs/client_certificate.pem
+          cp target/tls-gen/basic/result/client_localhost_key.pem tests/tls/certs/client_key.pem
+          chmod o+r tests/tls/certs/*
+          chmod g+r tests/tls/certs/*
+
+      - name: Create RabbitMQ TLS configuration
+        run: |
+          cat > tests/tls/certs/rabbitmq.conf << 'EOF'
+          listeners.ssl.default = 5671
+          ssl_options.cacertfile = /certs/ca_certificate.pem
+          ssl_options.certfile   = /certs/server_certificate.pem
+          ssl_options.keyfile    = /certs/server_key.pem
+          ssl_options.verify     = verify_peer
+          ssl_options.fail_if_no_peer_cert = false
+          EOF
+          sed -i 's/^[[:space:]]*//' tests/tls/certs/rabbitmq.conf
+          echo -n "tls-test-cookie" > tests/tls/certs/.erlang.cookie
+          chmod 600 tests/tls/certs/.erlang.cookie
+          sudo chown 999:999 tests/tls/certs/.erlang.cookie
+
+      - name: Start RabbitMQ with TLS
+        run: |
+          docker run -d --name rabbitmq-tls \
+            -p 5671:5671 \
+            -p 5672:5672 \
+            -v ${{ github.workspace }}/tests/tls/certs/.erlang.cookie:/var/lib/rabbitmq/.erlang.cookie \
+            -v ${{ github.workspace }}/tests/tls/certs:/certs:ro \
+            -v ${{ github.workspace }}/tests/tls/certs/rabbitmq.conf:/etc/rabbitmq/conf.d/10-tls.conf:ro \
+            rabbitmq:${{ matrix.rabbitmq-series }}
+
+      - name: Wait for RabbitMQ to start
+        run: |
+          for i in $(seq 1 30); do
+            if docker exec rabbitmq-tls rabbitmqctl await_startup --timeout 60; then
+              echo "RabbitMQ is ready"
+              exit 0
+            fi
+            echo "Waiting for container... ($i/30)"
+            sleep 2
+          done
+          echo "RabbitMQ failed to start. Container logs:"
+          docker logs rabbitmq-tls
+          exit 1
+
+      - name: Run TLS tests
+        run: |
+          TLS_CERTS_DIR=${{ github.workspace }}/tests/tls/certs \
+          cargo nextest run --all-features --run-ignored=only -E 'test(tls)' --no-fail-fast
+
+      - name: Stop RabbitMQ container
+        if: always()
+        run: docker stop rabbitmq-tls && docker rm rabbitmq-tls || true
+
+  audit:
+    name: Security audit
+    runs-on: ubuntu-latest
+    permissions:
+      checks: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo generate-lockfile
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  dependabot:
+    needs: [lint, build, tls-tests]
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: write
+    if: ${{ github.actor == 'dependabot[bot]' && github.event_name == 'pull_request' }}
+    steps:
+      - id: metadata
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: "${{ secrets.GITHUB_TOKEN }}"
+      - run: |
+          gh pr review --approve "$PR_URL"
+          gh pr merge --merge --auto "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

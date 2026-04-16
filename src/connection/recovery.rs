@@ -71,7 +71,25 @@ pub(crate) async fn attempt_recovery(
         tracing::info!(attempt, "attempting connection recovery");
         tokio::time::sleep(interval).await;
 
-        match try_reconnect(opts, resolver).await {
+        // Refresh credentials before reconnecting (e.g. expired OAuth 2 token).
+        let mut recovery_opts;
+        let effective_opts = if let Some(ref provider) = opts.credentials_provider {
+            recovery_opts = opts.clone();
+            match provider.credentials().await {
+                Ok(creds) => {
+                    recovery_opts.username = creds.username;
+                    recovery_opts.password = creds.password;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "credentials refresh failed during recovery");
+                }
+            }
+            &recovery_opts
+        } else {
+            opts
+        };
+
+        match try_reconnect(effective_opts, resolver).await {
             Ok(mut transport) => {
                 if !config.topology_recovery {
                     tracing::info!(
@@ -80,7 +98,7 @@ pub(crate) async fn attempt_recovery(
                     );
                     return Some((transport, Vec::new()));
                 }
-                match replay_topology(&mut transport, opts, topology, event_tx).await {
+                match replay_topology(&mut transport, effective_opts, topology, event_tx).await {
                     Ok(changes) => {
                         tracing::info!(attempt, "connection recovery succeeded");
                         return Some((transport, changes));
