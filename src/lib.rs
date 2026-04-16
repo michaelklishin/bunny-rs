@@ -28,7 +28,7 @@ pub use connection::{
     TopologyRecoveryFilter,
 };
 pub use consumer::{Consumer, ConsumerHandle, DeliveryHandler, SubscribeOptions};
-pub use credentials::{Credentials, CredentialsProvider, StaticCredentialsProvider};
+pub use credentials::{Credentials, CredentialsProvider, Password, StaticCredentialsProvider};
 pub use exchange::Exchange;
 pub use options::{
     ConsumeOptions, ExchangeDeclareOptions, ExchangeDeleteOptions, ExchangeType, PublishOptions,
