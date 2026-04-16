@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 
-name: OAuth2 Tests
+name: OAuth 2 Tests
 
 on:
   push:
@@ -23,7 +23,7 @@ env:
 
 jobs:
   oauth2-tests-stable:
-    name: OAuth2 tests (stable, RabbitMQ ${{ matrix.rabbitmq-series }})
+    name: OAuth 2 tests (stable, RabbitMQ ${{ matrix.rabbitmq-series }})
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     strategy:
@@ -74,7 +74,7 @@ jobs:
           docker logs rabbitmq-oauth2
           exit 1
 
-      - name: Configure OAuth2
+      - name: Configure OAuth 2
         run: |
           docker exec rabbitmq-oauth2 rabbitmq-plugins enable rabbitmq_auth_backend_oauth2
           docker exec rabbitmq-oauth2 rabbitmqctl eval '
@@ -86,10 +86,10 @@ jobs:
                {default_key, <<"test-key">>}]).
           '
 
-      - name: Verify OAuth2 plugin is enabled
+      - name: Verify OAuth 2 plugin is enabled
         run: docker exec rabbitmq-oauth2 rabbitmq-plugins list -e | grep oauth2
 
-      - name: Run OAuth2 tests
+      - name: Run OAuth 2 tests
         env:
           RUN_OAUTH2_TESTS: "1"
           OAUTH2_SIGNING_KEY_PATH: ${{ github.workspace }}/tests/oauth2/keys/signing_key.pem
@@ -102,7 +102,7 @@ jobs:
         run: docker stop rabbitmq-oauth2 && docker rm rabbitmq-oauth2 || true
 
   oauth2-tests-beta:
-    name: OAuth2 tests (beta, RabbitMQ ${{ matrix.rabbitmq-series }})
+    name: OAuth 2 tests (beta, RabbitMQ ${{ matrix.rabbitmq-series }})
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     strategy:
@@ -153,7 +153,7 @@ jobs:
           docker logs rabbitmq-oauth2
           exit 1
 
-      - name: Configure OAuth2
+      - name: Configure OAuth 2
         run: |
           docker exec rabbitmq-oauth2 rabbitmq-plugins enable rabbitmq_auth_backend_oauth2
           docker exec rabbitmq-oauth2 rabbitmqctl eval '
@@ -165,10 +165,10 @@ jobs:
                {default_key, <<"test-key">>}]).
           '
 
-      - name: Verify OAuth2 plugin is enabled
+      - name: Verify OAuth 2 plugin is enabled
         run: docker exec rabbitmq-oauth2 rabbitmq-plugins list -e | grep oauth2
 
-      - name: Run OAuth2 tests
+      - name: Run OAuth 2 tests
         env:
           RUN_OAUTH2_TESTS: "1"
           OAUTH2_SIGNING_KEY_PATH: ${{ github.workspace }}/tests/oauth2/keys/signing_key.pem

@@ -81,7 +81,18 @@ jobs:
       - uses: taiki-e/install-action@nextest
 
       - name: Wait for RabbitMQ to start
-        run: sleep 15
+        run: |
+          for i in $(seq 1 30); do
+            if docker exec ${{ job.services.rabbitmq.id }} rabbitmqctl await_startup --timeout 60; then
+              echo "RabbitMQ is ready"
+              exit 0
+            fi
+            echo "Waiting for container... ($i/30)"
+            sleep 2
+          done
+          echo "RabbitMQ failed to start. Container logs:"
+          docker logs ${{ job.services.rabbitmq.id }}
+          exit 1
 
       - name: Run tests
         run: cargo nextest run --all-features --no-fail-fast
@@ -142,6 +153,7 @@ jobs:
           sed -i 's/^[[:space:]]*//' tests/tls/certs/rabbitmq.conf
           echo -n "tls-test-cookie" > tests/tls/certs/.erlang.cookie
           chmod 600 tests/tls/certs/.erlang.cookie
+          sudo chown 999:999 tests/tls/certs/.erlang.cookie
 
       - name: Start RabbitMQ with TLS
         run: |
