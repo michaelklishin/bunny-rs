@@ -1,0 +1,133 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
+name: OAuth2 Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  oauth2-tests-stable:
+    name: OAuth2 tests (stable, RabbitMQ ${{ matrix.rabbitmq-series }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        rabbitmq-series:
+          - "4.1"
+          - "4.2"
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Generate RSA signing keys
+        run: |
+          mkdir -p tests/oauth2/keys
+          openssl genpkey -algorithm RSA -out tests/oauth2/keys/signing_key.pem \
+            -pkeyopt rsa_keygen_bits:2048
+          openssl rsa -pubout -in tests/oauth2/keys/signing_key.pem \
+            -out tests/oauth2/keys/signing_key_pub.pem
+
+      - name: Start RabbitMQ with OAuth2
+        run: |
+          docker run -d --name rabbitmq-oauth2 \
+            -p 5680:5680 \
+            -v ${{ github.workspace }}/tests/oauth2/keys/signing_key_pub.pem:/etc/rabbitmq/signing_key_pub.pem:ro \
+            -v ${{ github.workspace }}/tests/oauth2/rabbitmq-ci.conf:/etc/rabbitmq/conf.d/10-oauth2.conf:ro \
+            -v ${{ github.workspace }}/tests/oauth2/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro \
+            rabbitmq:${{ matrix.rabbitmq-series }}
+
+      - name: Wait for RabbitMQ to start
+        run: |
+          if ! docker exec rabbitmq-oauth2 rabbitmqctl await_startup --timeout 60; then
+            echo "RabbitMQ failed to start. Container logs:"
+            docker logs rabbitmq-oauth2
+            exit 1
+          fi
+
+      - name: Verify OAuth2 plugin is enabled
+        run: docker exec rabbitmq-oauth2 rabbitmq-plugins list -e | grep oauth2
+
+      - name: Run OAuth2 tests
+        env:
+          RUN_OAUTH2_TESTS: "1"
+          OAUTH2_SIGNING_KEY_PATH: ${{ github.workspace }}/tests/oauth2/keys/signing_key.pem
+          OAUTH2_RABBITMQ_PORT: "5680"
+        run: |
+          RUSTFLAGS="-D warnings" cargo nextest run --all-features -E 'test(oauth2)'
+
+      - name: Stop RabbitMQ container
+        if: always()
+        run: docker stop rabbitmq-oauth2 && docker rm rabbitmq-oauth2 || true
+
+  oauth2-tests-beta:
+    name: OAuth2 tests (beta, RabbitMQ ${{ matrix.rabbitmq-series }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        rabbitmq-series:
+          - "4.1"
+          - "4.2"
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@beta
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Generate RSA signing keys
+        run: |
+          mkdir -p tests/oauth2/keys
+          openssl genpkey -algorithm RSA -out tests/oauth2/keys/signing_key.pem \
+            -pkeyopt rsa_keygen_bits:2048
+          openssl rsa -pubout -in tests/oauth2/keys/signing_key.pem \
+            -out tests/oauth2/keys/signing_key_pub.pem
+
+      - name: Start RabbitMQ with OAuth2
+        run: |
+          docker run -d --name rabbitmq-oauth2 \
+            -p 5680:5680 \
+            -v ${{ github.workspace }}/tests/oauth2/keys/signing_key_pub.pem:/etc/rabbitmq/signing_key_pub.pem:ro \
+            -v ${{ github.workspace }}/tests/oauth2/rabbitmq-ci.conf:/etc/rabbitmq/conf.d/10-oauth2.conf:ro \
+            -v ${{ github.workspace }}/tests/oauth2/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro \
+            rabbitmq:${{ matrix.rabbitmq-series }}
+
+      - name: Wait for RabbitMQ to start
+        run: |
+          if ! docker exec rabbitmq-oauth2 rabbitmqctl await_startup --timeout 60; then
+            echo "RabbitMQ failed to start. Container logs:"
+            docker logs rabbitmq-oauth2
+            exit 1
+          fi
+
+      - name: Verify OAuth2 plugin is enabled
+        run: docker exec rabbitmq-oauth2 rabbitmq-plugins list -e | grep oauth2
+
+      - name: Run OAuth2 tests
+        env:
+          RUN_OAUTH2_TESTS: "1"
+          OAUTH2_SIGNING_KEY_PATH: ${{ github.workspace }}/tests/oauth2/keys/signing_key.pem
+          OAUTH2_RABBITMQ_PORT: "5680"
+        run: |
+          RUSTFLAGS="-D warnings" cargo nextest run --all-features -E 'test(oauth2)'
+
+      - name: Stop RabbitMQ container
+        if: always()
+        run: docker stop rabbitmq-oauth2 && docker rm rabbitmq-oauth2 || true

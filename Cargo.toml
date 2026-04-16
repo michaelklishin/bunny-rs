@@ -33,7 +33,9 @@ rustls-pemfile = { version = "2", optional = true }
 rustls-platform-verifier = { version = "0.5", optional = true }
 
 [dev-dependencies]
+jsonwebtoken = "9"
 proptest = "1"
+serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
