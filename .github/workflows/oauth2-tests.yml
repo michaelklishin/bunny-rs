@@ -45,7 +45,7 @@ jobs:
       - name: Start RabbitMQ with OAuth2
         run: |
           docker run -d --name rabbitmq-oauth2 \
-            -p 5680:5680 \
+            -p 5680:5672 \
             -v ${{ github.workspace }}/tests/oauth2/keys/signing_key_pub.pem:/etc/rabbitmq/signing_key_pub.pem:ro \
             -v ${{ github.workspace }}/tests/oauth2/rabbitmq-ci.conf:/etc/rabbitmq/conf.d/10-oauth2.conf:ro \
             -v ${{ github.workspace }}/tests/oauth2/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro \
@@ -103,7 +103,7 @@ jobs:
       - name: Start RabbitMQ with OAuth2
         run: |
           docker run -d --name rabbitmq-oauth2 \
-            -p 5680:5680 \
+            -p 5680:5672 \
             -v ${{ github.workspace }}/tests/oauth2/keys/signing_key_pub.pem:/etc/rabbitmq/signing_key_pub.pem:ro \
             -v ${{ github.workspace }}/tests/oauth2/rabbitmq-ci.conf:/etc/rabbitmq/conf.d/10-oauth2.conf:ro \
             -v ${{ github.workspace }}/tests/oauth2/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro \
