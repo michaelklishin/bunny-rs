@@ -46,6 +46,7 @@ jobs:
         run: |
           docker run -d --name rabbitmq-oauth2 \
             --hostname rabbitmq-oauth2 \
+            -e RABBITMQ_ERLANG_COOKIE='oauth2-test-cookie' \
             -p 5680:5672 \
             -v ${{ github.workspace }}/tests/oauth2/keys/signing_key_pub.pem:/etc/rabbitmq/signing_key_pub.pem:ro \
             rabbitmq:${{ matrix.rabbitmq-series }}
@@ -121,6 +122,7 @@ jobs:
         run: |
           docker run -d --name rabbitmq-oauth2 \
             --hostname rabbitmq-oauth2 \
+            -e RABBITMQ_ERLANG_COOKIE='oauth2-test-cookie' \
             -p 5680:5672 \
             -v ${{ github.workspace }}/tests/oauth2/keys/signing_key_pub.pem:/etc/rabbitmq/signing_key_pub.pem:ro \
             rabbitmq:${{ matrix.rabbitmq-series }}
