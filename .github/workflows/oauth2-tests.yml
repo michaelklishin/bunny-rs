@@ -34,21 +34,24 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
-      - name: Generate RSA signing keys
+      - name: Generate RSA signing keys and Erlang cookie
         run: |
           mkdir -p tests/oauth2/keys
           openssl genpkey -algorithm RSA -out tests/oauth2/keys/signing_key.pem \
             -pkeyopt rsa_keygen_bits:2048
           openssl rsa -pubout -in tests/oauth2/keys/signing_key.pem \
             -out tests/oauth2/keys/signing_key_pub.pem
+          echo 'oauth2-test-cookie' > tests/oauth2/keys/.erlang.cookie
+          chmod 600 tests/oauth2/keys/.erlang.cookie
+          sudo chown 999:999 tests/oauth2/keys/.erlang.cookie
 
       - name: Start RabbitMQ
         run: |
           docker run -d --name rabbitmq-oauth2 \
             --hostname rabbitmq-oauth2 \
-            -e RABBITMQ_ERLANG_COOKIE='oauth2-test-cookie' \
             -p 5680:5672 \
             -v ${{ github.workspace }}/tests/oauth2/keys/signing_key_pub.pem:/etc/rabbitmq/signing_key_pub.pem:ro \
+            -v ${{ github.workspace }}/tests/oauth2/keys/.erlang.cookie:/var/lib/rabbitmq/.erlang.cookie \
             rabbitmq:${{ matrix.rabbitmq-series }}
 
       - name: Wait for RabbitMQ to start
@@ -110,21 +113,24 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
-      - name: Generate RSA signing keys
+      - name: Generate RSA signing keys and Erlang cookie
         run: |
           mkdir -p tests/oauth2/keys
           openssl genpkey -algorithm RSA -out tests/oauth2/keys/signing_key.pem \
             -pkeyopt rsa_keygen_bits:2048
           openssl rsa -pubout -in tests/oauth2/keys/signing_key.pem \
             -out tests/oauth2/keys/signing_key_pub.pem
+          echo 'oauth2-test-cookie' > tests/oauth2/keys/.erlang.cookie
+          chmod 600 tests/oauth2/keys/.erlang.cookie
+          sudo chown 999:999 tests/oauth2/keys/.erlang.cookie
 
       - name: Start RabbitMQ
         run: |
           docker run -d --name rabbitmq-oauth2 \
             --hostname rabbitmq-oauth2 \
-            -e RABBITMQ_ERLANG_COOKIE='oauth2-test-cookie' \
             -p 5680:5672 \
             -v ${{ github.workspace }}/tests/oauth2/keys/signing_key_pub.pem:/etc/rabbitmq/signing_key_pub.pem:ro \
+            -v ${{ github.workspace }}/tests/oauth2/keys/.erlang.cookie:/var/lib/rabbitmq/.erlang.cookie \
             rabbitmq:${{ matrix.rabbitmq-series }}
 
       - name: Wait for RabbitMQ to start
