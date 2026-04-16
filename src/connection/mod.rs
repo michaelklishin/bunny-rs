@@ -903,15 +903,22 @@ async fn reader_loop_impl(
             }
 
             // Restart credential refresh loop for the recovered connection
-            if let Some(ref provider) = inner.opts.credentials_provider
-                && let Ok(creds) = provider.credentials().await
-                && let Some(ttl) = creds.valid_until
-            {
-                let cr_inner = inner.clone();
-                let cr_provider = provider.clone();
-                tokio::spawn(async move {
-                    credential_refresh_loop(cr_inner, cr_provider, ttl, generation).await;
-                });
+            if let Some(ref provider) = inner.opts.credentials_provider {
+                match provider.credentials().await {
+                    Ok(creds) => {
+                        if let Some(ttl) = creds.valid_until {
+                            let cr_inner = inner.clone();
+                            let cr_provider = provider.clone();
+                            tokio::spawn(async move {
+                                credential_refresh_loop(cr_inner, cr_provider, ttl, generation)
+                                    .await;
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "credentials provider failed after recovery, refresh loop not restarted");
+                    }
+                }
             }
         }
         None => {
