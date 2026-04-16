@@ -71,7 +71,7 @@ pub(crate) async fn attempt_recovery(
         tracing::info!(attempt, "attempting connection recovery");
         tokio::time::sleep(interval).await;
 
-        // Refresh credentials before reconnecting (e.g. expired OAuth2 token).
+        // Refresh credentials before reconnecting (e.g. expired OAuth 2 token).
         let mut recovery_opts;
         let effective_opts = if let Some(ref provider) = opts.credentials_provider {
             recovery_opts = opts.clone();

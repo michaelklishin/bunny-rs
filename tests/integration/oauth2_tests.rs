@@ -6,14 +6,19 @@
 //! against a RabbitMQ node set up to use OAuth 2 for authN and authZ.
 //!
 //! Skipped by default. Set `RUN_OAUTH2_TESTS=1` to enable.
-//! See `tests/oauth2/` for the RabbitMQ config files.
+//! See `tests/oauth2/rabbitmq.conf` for the local RabbitMQ configuration.
 
 use std::env;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 
-use bunny_rs::connection::{AuthMechanism, Connection, ConnectionOptions};
+use bunny_rs::connection::{AuthMechanism, Connection, ConnectionEvent, ConnectionOptions};
+use bunny_rs::credentials::{Credentials, CredentialsProvider, Password};
+use bunny_rs::errors::BoxError;
 
 fn should_run() -> bool {
     env::var("RUN_OAUTH2_TESTS").is_ok_and(|v| v == "1")
@@ -32,7 +37,7 @@ fn oauth2_port() -> u16 {
         .unwrap_or(5680)
 }
 
-/// Mint a JWT signed with RS256 matching the RabbitMQ OAuth2 backend config.
+/// Mint a JWT signed with RS256 matching the RabbitMQ OAuth 2 backend config.
 fn mint_token(key_pem: &[u8], ttl: Duration) -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -62,7 +67,7 @@ fn connect_opts(token: &str) -> ConnectionOptions {
     ConnectionOptions {
         host: "localhost".into(),
         port: oauth2_port(),
-        // The OAuth2 backend ignores the username from the SASL handshake
+        // The OAuth 2 backend ignores the username from the SASL handshake
         // and extracts it from the JWT `sub` claim instead.
         username: "oauth2-test-user".into(),
         password: token.into(),
@@ -75,7 +80,7 @@ fn connect_opts(token: &str) -> ConnectionOptions {
 #[tokio::test]
 async fn test_oauth2_update_secret() {
     if !should_run() {
-        eprintln!("skipping: set RUN_OAUTH2_TESTS=1 to run OAuth2 tests");
+        eprintln!("skipping: set RUN_OAUTH2_TESTS=1 to run OAuth 2 tests");
         return;
     }
 
@@ -97,7 +102,7 @@ async fn test_oauth2_update_secret() {
 #[tokio::test]
 async fn test_oauth2_multiple_refreshes() {
     if !should_run() {
-        eprintln!("skipping: set RUN_OAUTH2_TESTS=1 to run OAuth2 tests");
+        eprintln!("skipping: set RUN_OAUTH2_TESTS=1 to run OAuth 2 tests");
         return;
     }
 
@@ -118,7 +123,7 @@ async fn test_oauth2_multiple_refreshes() {
 #[tokio::test]
 async fn test_oauth2_invalid_token_rejected() {
     if !should_run() {
-        eprintln!("skipping: set RUN_OAUTH2_TESTS=1 to run OAuth2 tests");
+        eprintln!("skipping: set RUN_OAUTH2_TESTS=1 to run OAuth 2 tests");
         return;
     }
 
@@ -130,4 +135,66 @@ async fn test_oauth2_invalid_token_rejected() {
     // with 530 NOT_ALLOWED.
     let result = conn.update_secret("not-a-valid-jwt", "bad token").await;
     assert!(result.is_err(), "expected error for invalid token");
+}
+
+/// A [`CredentialsProvider`] that mints fresh JWTs on every call.
+struct JwtProvider {
+    key_pem: Vec<u8>,
+    ttl: Duration,
+}
+
+impl CredentialsProvider for JwtProvider {
+    fn credentials(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<Credentials, BoxError>> + Send + '_>> {
+        let token = mint_token(&self.key_pem, self.ttl);
+        Box::pin(std::future::ready(Ok(Credentials {
+            username: "oauth2-test-user".into(),
+            password: Password::from(token),
+            valid_until: Some(self.ttl),
+        })))
+    }
+}
+
+#[tokio::test]
+async fn test_oauth2_credential_refresh_loop() {
+    if !should_run() {
+        eprintln!("skipping: set RUN_OAUTH2_TESTS=1 to run OAuth 2 tests");
+        return;
+    }
+
+    // 5s TTL → refresh fires at 80% = 4s, leaving 1s headroom before expiry.
+    let provider = Arc::new(JwtProvider {
+        key_pem: signing_key_pem(),
+        ttl: Duration::from_secs(5),
+    });
+
+    let opts = ConnectionOptions {
+        host: "localhost".into(),
+        port: oauth2_port(),
+        virtual_host: "/".into(),
+        auth_mechanism: AuthMechanism::Plain,
+        credentials_provider: Some(provider),
+        ..Default::default()
+    };
+
+    let conn = Connection::open(opts).await.unwrap();
+    let mut events = conn.events();
+
+    // Wait for the refresh loop to fire and the server to accept the new JWT.
+    let got_event = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if let Ok(ConnectionEvent::CredentialRefreshed) = events.recv().await {
+                return;
+            }
+        }
+    })
+    .await;
+    assert!(got_event.is_ok(), "expected CredentialRefreshed event");
+    assert!(
+        conn.is_open(),
+        "connection should remain open after refresh"
+    );
+
+    conn.close().await.unwrap();
 }
