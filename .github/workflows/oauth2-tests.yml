@@ -42,26 +42,39 @@ jobs:
           openssl rsa -pubout -in tests/oauth2/keys/signing_key.pem \
             -out tests/oauth2/keys/signing_key_pub.pem
 
-      - name: Prepare enabled_plugins
-        run: |
-          echo '[rabbitmq_auth_backend_oauth2].' > tests/oauth2/enabled_plugins_ci
-
-      - name: Start RabbitMQ with OAuth2
+      - name: Start RabbitMQ
         run: |
           docker run -d --name rabbitmq-oauth2 \
+            --hostname rabbitmq-oauth2 \
             -p 5680:5672 \
             -v ${{ github.workspace }}/tests/oauth2/keys/signing_key_pub.pem:/etc/rabbitmq/signing_key_pub.pem:ro \
-            -v ${{ github.workspace }}/tests/oauth2/rabbitmq-ci.conf:/etc/rabbitmq/conf.d/10-oauth2.conf:ro \
-            -v ${{ github.workspace }}/tests/oauth2/enabled_plugins_ci:/etc/rabbitmq/enabled_plugins \
             rabbitmq:${{ matrix.rabbitmq-series }}
 
       - name: Wait for RabbitMQ to start
         run: |
-          if ! docker exec rabbitmq-oauth2 rabbitmqctl await_startup --timeout 60; then
-            echo "RabbitMQ failed to start. Container logs:"
-            docker logs rabbitmq-oauth2
-            exit 1
-          fi
+          for i in $(seq 1 60); do
+            if docker exec rabbitmq-oauth2 rabbitmqctl await_startup --timeout 60; then
+              echo "RabbitMQ is ready"
+              exit 0
+            fi
+            echo "Waiting for container... ($i/60)"
+            sleep 2
+          done
+          echo "RabbitMQ failed to start. Container logs:"
+          docker logs rabbitmq-oauth2
+          exit 1
+
+      - name: Configure OAuth2
+        run: |
+          docker exec rabbitmq-oauth2 rabbitmq-plugins enable rabbitmq_auth_backend_oauth2
+          docker exec rabbitmq-oauth2 rabbitmqctl eval '
+            application:set_env(rabbit, auth_backends, [rabbit_auth_backend_oauth2, rabbit_auth_backend_internal]),
+            application:set_env(rabbitmq_auth_backend_oauth2, resource_server_id, <<"rabbitmq">>),
+            application:set_env(rabbitmq_auth_backend_oauth2, preferred_username_claims, [<<"sub">>]),
+            application:set_env(rabbitmq_auth_backend_oauth2, key_config,
+              [{signing_keys, #{<<"test-key">> => {pem, element(2, file:read_file(<<"/etc/rabbitmq/signing_key_pub.pem">>))}}},
+               {default_key, <<"test-key">>}]).
+          '
 
       - name: Verify OAuth2 plugin is enabled
         run: docker exec rabbitmq-oauth2 rabbitmq-plugins list -e | grep oauth2
@@ -104,26 +117,39 @@ jobs:
           openssl rsa -pubout -in tests/oauth2/keys/signing_key.pem \
             -out tests/oauth2/keys/signing_key_pub.pem
 
-      - name: Prepare enabled_plugins
-        run: |
-          echo '[rabbitmq_auth_backend_oauth2].' > tests/oauth2/enabled_plugins_ci
-
-      - name: Start RabbitMQ with OAuth2
+      - name: Start RabbitMQ
         run: |
           docker run -d --name rabbitmq-oauth2 \
+            --hostname rabbitmq-oauth2 \
             -p 5680:5672 \
             -v ${{ github.workspace }}/tests/oauth2/keys/signing_key_pub.pem:/etc/rabbitmq/signing_key_pub.pem:ro \
-            -v ${{ github.workspace }}/tests/oauth2/rabbitmq-ci.conf:/etc/rabbitmq/conf.d/10-oauth2.conf:ro \
-            -v ${{ github.workspace }}/tests/oauth2/enabled_plugins_ci:/etc/rabbitmq/enabled_plugins \
             rabbitmq:${{ matrix.rabbitmq-series }}
 
       - name: Wait for RabbitMQ to start
         run: |
-          if ! docker exec rabbitmq-oauth2 rabbitmqctl await_startup --timeout 60; then
-            echo "RabbitMQ failed to start. Container logs:"
-            docker logs rabbitmq-oauth2
-            exit 1
-          fi
+          for i in $(seq 1 60); do
+            if docker exec rabbitmq-oauth2 rabbitmqctl await_startup --timeout 60; then
+              echo "RabbitMQ is ready"
+              exit 0
+            fi
+            echo "Waiting for container... ($i/60)"
+            sleep 2
+          done
+          echo "RabbitMQ failed to start. Container logs:"
+          docker logs rabbitmq-oauth2
+          exit 1
+
+      - name: Configure OAuth2
+        run: |
+          docker exec rabbitmq-oauth2 rabbitmq-plugins enable rabbitmq_auth_backend_oauth2
+          docker exec rabbitmq-oauth2 rabbitmqctl eval '
+            application:set_env(rabbit, auth_backends, [rabbit_auth_backend_oauth2, rabbit_auth_backend_internal]),
+            application:set_env(rabbitmq_auth_backend_oauth2, resource_server_id, <<"rabbitmq">>),
+            application:set_env(rabbitmq_auth_backend_oauth2, preferred_username_claims, [<<"sub">>]),
+            application:set_env(rabbitmq_auth_backend_oauth2, key_config,
+              [{signing_keys, #{<<"test-key">> => {pem, element(2, file:read_file(<<"/etc/rabbitmq/signing_key_pub.pem">>))}}},
+               {default_key, <<"test-key">>}]).
+          '
 
       - name: Verify OAuth2 plugin is enabled
         run: docker exec rabbitmq-oauth2 rabbitmq-plugins list -e | grep oauth2
