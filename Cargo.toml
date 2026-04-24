@@ -39,6 +39,10 @@ serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+[[bin]]
+name = "publish-throughput"
+path = "benchmarks/publish_throughput.rs"
+
 [features]
 default = ["tls"]
 zeroize = ["dep:zeroize"]

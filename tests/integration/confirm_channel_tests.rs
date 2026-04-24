@@ -41,7 +41,7 @@ async fn test_confirm_channel_seq_no() {
     let ch = conn.open_channel().await.unwrap();
     let mut confirm_ch = ch.into_confirm_mode().await.unwrap();
 
-    assert_eq!(confirm_ch.next_publish_seq_no().await, 1);
+    assert_eq!(confirm_ch.next_publish_seq_no(), 1);
 
     confirm_ch
         .queue_declare("bunny-rs.test.cc-seq", QueueDeclareOptions::default())
@@ -52,7 +52,7 @@ async fn test_confirm_channel_seq_no() {
         .publish("", "bunny-rs.test.cc-seq", &PublishOptions::default(), b"a")
         .await
         .unwrap();
-    assert_eq!(confirm_ch.next_publish_seq_no().await, 2);
+    assert_eq!(confirm_ch.next_publish_seq_no(), 2);
 
     confirm_ch
         .queue_delete("bunny-rs.test.cc-seq", QueueDeleteOptions::default())

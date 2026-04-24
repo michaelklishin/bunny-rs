@@ -34,8 +34,8 @@ impl ConfirmChannel {
     }
 
     /// Next publish sequence number.
-    pub async fn next_publish_seq_no(&self) -> u64 {
-        self.channel.next_publish_seq_no().await
+    pub fn next_publish_seq_no(&self) -> u64 {
+        self.channel.next_publish_seq_no()
     }
 }
 

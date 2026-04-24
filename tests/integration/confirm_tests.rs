@@ -83,7 +83,7 @@ async fn test_publish_seq_no_increments() {
     let mut ch = conn.open_channel().await.unwrap();
 
     ch.confirm_select().await.unwrap();
-    assert_eq!(ch.next_publish_seq_no().await, 1);
+    assert_eq!(ch.next_publish_seq_no(), 1);
 
     ch.queue_declare("bunny-rs.test.seq-no", QueueDeclareOptions::default())
         .await
@@ -97,7 +97,7 @@ async fn test_publish_seq_no_increments() {
     )
     .await
     .unwrap();
-    assert_eq!(ch.next_publish_seq_no().await, 2);
+    assert_eq!(ch.next_publish_seq_no(), 2);
 
     ch.basic_publish(
         "",
@@ -107,7 +107,7 @@ async fn test_publish_seq_no_increments() {
     )
     .await
     .unwrap();
-    assert_eq!(ch.next_publish_seq_no().await, 3);
+    assert_eq!(ch.next_publish_seq_no(), 3);
 
     ch.queue_delete("bunny-rs.test.seq-no", QueueDeleteOptions::default())
         .await

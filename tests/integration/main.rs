@@ -35,3 +35,4 @@ mod tls_tests;
 mod tx_channel_tests;
 mod tx_tests;
 mod update_secret_tests;
+mod wait_for_confirms_tests;

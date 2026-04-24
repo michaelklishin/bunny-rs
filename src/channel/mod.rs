@@ -5,12 +5,13 @@
 use std::collections::{HashMap, VecDeque};
 use std::mem;
 use std::str;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use bytes::Bytes;
 use compact_str::CompactString;
-use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, broadcast, mpsc, oneshot};
+use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, Semaphore, broadcast, mpsc, oneshot};
 
 use crate::connection::topology::TopologyRegistry;
 use crate::connection::{ConnectionError, WriterCommand, WriterTx};
@@ -161,14 +162,17 @@ impl ReturnedMessage {
     }
 }
 
+/// Publisher confirm tracking, separated from the main channel state
+/// so that the publish hot path and the dispatcher's ack-resolution path
+/// do not contend on the same mutex.
+pub(crate) struct ConfirmState {
+    pending: VecDeque<(u64, oneshot::Sender<bool>, Option<OwnedSemaphorePermit>)>,
+    notify: Arc<Notify>,
+}
+
 /// Shared channel/dispatcher state.
 pub(crate) struct ChannelInner {
-    confirm_pending: VecDeque<(u64, oneshot::Sender<bool>, Option<OwnedSemaphorePermit>)>,
-    confirm_next_seq: u64,
-    confirms_enabled: bool,
-    confirm_semaphore: Option<Arc<Semaphore>>,
     pub(crate) consumers: HashMap<CompactString, mpsc::UnboundedSender<RawDelivery>>,
-    // basic.get result sender
     get_result_tx: Option<oneshot::Sender<RawDelivery>>,
     return_tx: mpsc::UnboundedSender<ReturnedMessage>,
 }
@@ -179,6 +183,10 @@ pub struct Channel {
     writer_tx: WriterTx,
     frame_max: u32,
     inner: Arc<Mutex<ChannelInner>>,
+    confirms: Arc<Mutex<ConfirmState>>,
+    confirm_seq: Arc<AtomicU64>,
+    confirms_enabled: Arc<AtomicBool>,
+    confirm_semaphore: Arc<Mutex<Option<Arc<Semaphore>>>>,
     topology: Arc<Mutex<TopologyRegistry>>,
     rpc_rx: mpsc::UnboundedReceiver<Method>,
     delivery_rxs: HashMap<CompactString, mpsc::UnboundedReceiver<RawDelivery>>,
@@ -223,11 +231,15 @@ impl Channel {
         topology: Arc<Mutex<TopologyRegistry>>,
     ) -> Self {
         let (return_tx, return_rx) = mpsc::unbounded_channel();
+        let confirms = Arc::new(Mutex::new(ConfirmState {
+            pending: VecDeque::new(),
+            notify: Arc::new(Notify::new()),
+        }));
+        let confirm_seq = Arc::new(AtomicU64::new(1));
+        let confirms_enabled = Arc::new(AtomicBool::new(false));
+        let confirm_semaphore: Arc<Mutex<Option<Arc<Semaphore>>>> = Arc::new(Mutex::new(None));
+
         let inner = Arc::new(Mutex::new(ChannelInner {
-            confirm_pending: VecDeque::new(),
-            confirm_next_seq: 1,
-            confirms_enabled: false,
-            confirm_semaphore: None,
             consumers: HashMap::new(),
             get_result_tx: None,
             return_tx,
@@ -237,6 +249,7 @@ impl Channel {
         let (event_tx, _) = broadcast::channel(16);
 
         let dispatcher_inner = inner.clone();
+        let dispatcher_confirms = confirms.clone();
         let dispatcher_writer = writer_tx.clone();
         let dispatcher_event_tx = event_tx.clone();
         let ch_id = id;
@@ -246,6 +259,7 @@ impl Channel {
                 frame_rx,
                 rpc_tx,
                 dispatcher_inner,
+                dispatcher_confirms,
                 dispatcher_writer,
                 dispatcher_event_tx,
             )
@@ -257,6 +271,10 @@ impl Channel {
             writer_tx,
             frame_max,
             inner,
+            confirms,
+            confirm_seq,
+            confirms_enabled,
+            confirm_semaphore,
             topology,
             rpc_rx,
             delivery_rxs: HashMap::new(),
@@ -763,31 +781,32 @@ impl Channel {
 
         let raw = Bytes::from(buf);
 
-        // Fast path: skip both mutex locks when confirms are not enabled.
-        let confirm = {
-            let mut inner = self.inner.lock().await;
-            if inner.confirms_enabled {
-                let permit = match inner.confirm_semaphore.clone() {
+        // Fast path: skip all locking when confirms are not enabled.
+        let confirm = if self.confirms_enabled.load(Ordering::Acquire) {
+            let permit = {
+                let guard = self.confirm_semaphore.lock().await;
+                match guard.clone() {
                     Some(sem) => {
-                        // Must release lock before the potentially-blocking acquire.
-                        drop(inner);
+                        drop(guard);
                         let permit = sem
                             .acquire_owned()
                             .await
                             .map_err(|_| ConnectionError::ChannelNotOpen)?;
-                        inner = self.inner.lock().await;
                         Some(permit)
                     }
                     None => None,
-                };
-                let seq_no = inner.confirm_next_seq;
-                inner.confirm_next_seq += 1;
-                let (tx, rx) = oneshot::channel();
-                inner.confirm_pending.push_back((seq_no, tx, permit));
-                Some(PublishConfirm { rx })
-            } else {
-                None
-            }
+                }
+            };
+            let seq_no = self.confirm_seq.fetch_add(1, Ordering::Relaxed);
+            let (tx, rx) = oneshot::channel();
+            self.confirms
+                .lock()
+                .await
+                .pending
+                .push_back((seq_no, tx, permit));
+            Some(PublishConfirm { rx })
+        } else {
+            None
         };
 
         self.writer_tx
@@ -1146,8 +1165,7 @@ impl Channel {
         let method = Method::ConfirmSelect(Box::new(ConfirmSelectArgs { nowait: false }));
         match self.rpc(method).await? {
             Method::ConfirmSelectOk => {
-                let mut inner = self.inner.lock().await;
-                inner.confirms_enabled = true;
+                self.confirms_enabled.store(true, Ordering::Release);
                 Ok(())
             }
             _ => Err(ConnectionError::UnexpectedMethod),
@@ -1162,8 +1180,8 @@ impl Channel {
     ) -> Result<(), ConnectionError> {
         self.confirm_select().await?;
         if outstanding_limit > 0 {
-            let mut inner = self.inner.lock().await;
-            inner.confirm_semaphore = Some(Arc::new(Semaphore::new(outstanding_limit)));
+            *self.confirm_semaphore.lock().await =
+                Some(Arc::new(Semaphore::new(outstanding_limit)));
         }
         Ok(())
     }
@@ -1171,22 +1189,24 @@ impl Channel {
     /// Block until all pending confirms resolve.
     pub async fn wait_for_confirms(&self) -> Result<(), ConnectionError> {
         loop {
-            let pending = {
-                let inner = self.inner.lock().await;
-                inner.confirm_pending.len()
-            };
-            if pending == 0 {
+            let cs = self.confirms.lock().await;
+            if cs.pending.is_empty() {
                 return Ok(());
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            // Clone the Arc<Notify> while holding the lock, then drop the
+            // lock before blocking. If the dispatcher fires notify_waiters()
+            // between the drop and the .await, the loop will re-check
+            // pending on the next iteration.
+            let notify = cs.notify.clone();
+            drop(cs);
+            notify.notified().await;
         }
     }
 
     /// Next publish sequence number.
-    pub async fn next_publish_seq_no(&self) -> u64 {
-        let inner = self.inner.lock().await;
-        if inner.confirms_enabled {
-            inner.confirm_next_seq
+    pub fn next_publish_seq_no(&self) -> u64 {
+        if self.confirms_enabled.load(Ordering::Acquire) {
+            self.confirm_seq.load(Ordering::Relaxed)
         } else {
             0
         }
@@ -1201,12 +1221,7 @@ impl Channel {
 
         // Drain pending confirms so publishers get a clean PublishNacked
         // instead of an opaque ChannelNotOpen error when the sender is dropped.
-        {
-            let mut inner = self.inner.lock().await;
-            while let Some((_seq, tx, _permit)) = inner.confirm_pending.pop_front() {
-                let _ = tx.send(false);
-            }
-        }
+        drain_confirms(&self.confirms).await;
 
         // Send channel.close; dispatcher handles close-ok
         let method = Method::ChannelClose(Box::new(ChannelCloseArgs {
@@ -1289,6 +1304,7 @@ async fn dispatcher_loop(
     mut frame_rx: mpsc::UnboundedReceiver<Frame>,
     rpc_tx: mpsc::UnboundedSender<Method>,
     inner: Arc<Mutex<ChannelInner>>,
+    confirms: Arc<Mutex<ConfirmState>>,
     writer_tx: WriterTx,
     event_tx: broadcast::Sender<ChannelEvent>,
 ) {
@@ -1303,16 +1319,18 @@ async fn dispatcher_loop(
                         delivery_tag,
                         multiple,
                     } => {
-                        let mut inner = inner.lock().await;
-                        resolve_confirms(&mut inner.confirm_pending, delivery_tag, multiple, true);
+                        let mut cs = confirms.lock().await;
+                        resolve_confirms(&mut cs.pending, delivery_tag, multiple, true);
+                        cs.notify.notify_waiters();
                     }
                     Method::BasicNack {
                         delivery_tag,
                         multiple,
                         ..
                     } => {
-                        let mut inner = inner.lock().await;
-                        resolve_confirms(&mut inner.confirm_pending, delivery_tag, multiple, false);
+                        let mut cs = confirms.lock().await;
+                        resolve_confirms(&mut cs.pending, delivery_tag, multiple, false);
+                        cs.notify.notify_waiters();
                     }
 
                     // Start content assembly
@@ -1381,14 +1399,7 @@ async fn dispatcher_loop(
                             method_id: args.method_id,
                             initiated_by_server: true,
                         });
-                        // Drain pending confirms so publishers don't hang
-                        {
-                            let mut inner = inner.lock().await;
-                            while let Some((_seq, tx, _permit)) = inner.confirm_pending.pop_front()
-                            {
-                                let _ = tx.send(false);
-                            }
-                        }
+                        drain_confirms(&confirms).await;
                         let close_ok = Frame::Method(channel_id, Box::new(Method::ChannelCloseOk));
                         let _ = writer_tx.send(WriterCommand::SendFrame(close_ok)).await;
                         let _ = rpc_tx.send(*method);
@@ -1475,7 +1486,8 @@ async fn dispatcher_loop(
     }
 }
 
-fn resolve_confirms(
+#[doc(hidden)]
+pub fn resolve_confirms(
     pending: &mut VecDeque<(u64, oneshot::Sender<bool>, Option<OwnedSemaphorePermit>)>,
     delivery_tag: u64,
     multiple: bool,
@@ -1496,6 +1508,15 @@ fn resolve_confirms(
     {
         let _ = tx.send(ack);
     }
+}
+
+/// Nack all pending confirms and wake any `wait_for_confirms` waiters.
+async fn drain_confirms(confirms: &Mutex<ConfirmState>) {
+    let mut cs = confirms.lock().await;
+    while let Some((_seq, tx, _permit)) = cs.pending.pop_front() {
+        let _ = tx.send(false);
+    }
+    cs.notify.notify_waiters();
 }
 
 async fn dispatch_delivery(
