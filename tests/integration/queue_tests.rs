@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use crate::test_helpers::connect;
 use bunny_rs::options::{
-    ExchangeDeclareOptions, ExchangeDeleteOptions, PublishOptions, QueueDeclareOptions,
-    QueueDeleteOptions,
+    ExchangeDeclareOptions, ExchangeDeleteOptions, OverflowMode, PublishOptions,
+    QueueDeclareOptions, QueueDeleteOptions,
 };
 use bunny_rs::protocol::types::FieldTable;
 
@@ -270,6 +270,92 @@ async fn test_queue_unbind() {
     ch.exchange_delete("bunny-rs.test.unbind-x", ExchangeDeleteOptions::default())
         .await
         .unwrap();
+    ch.close().await.unwrap();
+    conn.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_durable_queue_with_overflow_reject_publish() {
+    let conn = connect().await;
+    let mut ch = conn.open_channel().await.unwrap();
+
+    ch.queue_declare(
+        "bunny-rs.test.overflow-reject-q",
+        QueueDeclareOptions::default()
+            .max_length(10)
+            .overflow(OverflowMode::RejectPublish),
+    )
+    .await
+    .unwrap();
+
+    ch.queue_delete(
+        "bunny-rs.test.overflow-reject-q",
+        QueueDeleteOptions::default(),
+    )
+    .await
+    .unwrap();
+    ch.close().await.unwrap();
+    conn.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_durable_queue_with_single_active_consumer() {
+    let conn = connect().await;
+    let mut ch = conn.open_channel().await.unwrap();
+
+    ch.queue_declare(
+        "bunny-rs.test.sac-q",
+        QueueDeclareOptions::default().single_active_consumer(),
+    )
+    .await
+    .unwrap();
+
+    ch.queue_delete("bunny-rs.test.sac-q", QueueDeleteOptions::default())
+        .await
+        .unwrap();
+    ch.close().await.unwrap();
+    conn.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_durable_queue_with_expires() {
+    let conn = connect().await;
+    let mut ch = conn.open_channel().await.unwrap();
+
+    ch.queue_declare(
+        "bunny-rs.test.expires-q",
+        QueueDeclareOptions::default().expires(Duration::from_secs(300)),
+    )
+    .await
+    .unwrap();
+
+    ch.queue_delete("bunny-rs.test.expires-q", QueueDeleteOptions::default())
+        .await
+        .unwrap();
+    ch.close().await.unwrap();
+    conn.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_quorum_queue_with_max_length_and_overflow() {
+    let conn = connect().await;
+    let mut ch = conn.open_channel().await.unwrap();
+
+    ch.queue_declare(
+        "bunny-rs.test.quorum-maxlen-q",
+        QueueDeclareOptions::quorum()
+            .max_length(100)
+            .overflow(OverflowMode::RejectPublish),
+    )
+    .await
+    .unwrap();
+
+    ch.queue_delete(
+        "bunny-rs.test.quorum-maxlen-q",
+        QueueDeleteOptions::default(),
+    )
+    .await
+    .unwrap();
     ch.close().await.unwrap();
     conn.close().await.unwrap();
 }
