@@ -7,7 +7,7 @@ use std::mem;
 use std::str;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use compact_str::CompactString;
@@ -1025,13 +1025,18 @@ impl Channel {
         ))
     }
 
-    /// Polls a queue for a single message. Returns `None` if empty.
+    /// Polls a queue for a single message. Returns `None` if the queue is empty.
     ///
-    /// # Warning
+    /// # Strongly discouraged
     ///
-    /// **Do not use this in a loop.** Polling with `basic_get` is extremely
-    /// inefficient compared to [`basic_consume`](Self::basic_consume).
-    /// See [RabbitMQ documentation on polling consumers](https://www.rabbitmq.com/docs/consumers#polling).
+    /// Polling is an AMQP 0-9-1 anti-pattern: every call is a synchronous
+    /// round-trip, so a `basic_get` loop wastes broker CPU and adds latency
+    /// that a long-running subscription avoids. Use
+    /// [`basic_consume`](Self::basic_consume),
+    /// [`basic_consume_with`](Self::basic_consume_with), or
+    /// [`Queue::subscribe`](crate::queue::Queue::subscribe) instead.
+    /// Reserve `basic_get` for one-off inspection, interactive development sessions, and basic tests.
+    /// See the [RabbitMQ docs on polling consumers](https://www.rabbitmq.com/docs/consumers#polling).
     pub async fn basic_get(
         &mut self,
         queue: &str,
@@ -1102,10 +1107,27 @@ impl Channel {
         self.basic_ack(delivery_tag, true).await
     }
 
+    /// Negatively acknowledge a single delivery and requeue it.
+    pub async fn nack(&self, delivery_tag: u64) -> Result<(), ConnectionError> {
+        self.basic_nack(delivery_tag, false, true).await
+    }
+
     /// Negatively acknowledge all deliveries up to and including `delivery_tag`
     /// and requeue them.
     pub async fn nack_multiple(&self, delivery_tag: u64) -> Result<(), ConnectionError> {
         self.basic_nack(delivery_tag, true, true).await
+    }
+
+    /// Negatively acknowledge a single delivery and discard it
+    /// (dead-letter if configured).
+    pub async fn nack_discard(&self, delivery_tag: u64) -> Result<(), ConnectionError> {
+        self.basic_nack(delivery_tag, false, false).await
+    }
+
+    /// Negatively acknowledge all deliveries up to and including `delivery_tag`
+    /// and discard them (dead-letter if configured).
+    pub async fn nack_discard_multiple(&self, delivery_tag: u64) -> Result<(), ConnectionError> {
+        self.basic_nack(delivery_tag, true, false).await
     }
 
     /// Reject a single delivery and requeue it.
@@ -1113,7 +1135,7 @@ impl Channel {
         self.basic_reject(delivery_tag, true).await
     }
 
-    /// Reject a single delivery and discard (dead-letter) it.
+    /// Reject a single delivery and discard it (dead-letter if configured).
     pub async fn discard(&self, delivery_tag: u64) -> Result<(), ConnectionError> {
         self.basic_reject(delivery_tag, false).await
     }
@@ -1582,8 +1604,8 @@ where
 }
 
 /// Generates a client-side consumer tag of the form `bunny-rs-<unix_ms>-<rand>`.
-pub(crate) fn generate_consumer_tag() -> CompactString {
-    use std::time::{SystemTime, UNIX_EPOCH};
+#[doc(hidden)]
+pub fn generate_consumer_tag() -> CompactString {
     let ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -1734,7 +1756,7 @@ impl Delivery {
         self.properties().get_content_type()
     }
 
-    /// Acknowledge this single delivery.
+    /// Acknowledge this delivery.
     pub async fn ack(&self) -> Result<(), ConnectionError> {
         self.acker.ack(self.delivery_tag, false).await
     }
@@ -1756,6 +1778,18 @@ impl Delivery {
         self.acker.nack(self.delivery_tag, true, true).await
     }
 
+    /// Negatively acknowledge this delivery and discard it
+    /// (dead-letter if configured).
+    pub async fn nack_discard(&self) -> Result<(), ConnectionError> {
+        self.acker.nack(self.delivery_tag, false, false).await
+    }
+
+    /// Negatively acknowledge this delivery and all earlier unacknowledged
+    /// deliveries on the same channel; discard them (dead-letter if configured).
+    pub async fn nack_discard_multiple(&self) -> Result<(), ConnectionError> {
+        self.acker.nack(self.delivery_tag, true, false).await
+    }
+
     /// Reject this delivery and requeue it.
     pub async fn reject(&self) -> Result<(), ConnectionError> {
         self.acker.reject(self.delivery_tag, true).await
@@ -1770,32 +1804,5 @@ impl Delivery {
     /// example, when handing the body off to a worker task).
     pub fn acker(&self) -> Acker {
         self.acker.clone()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::generate_consumer_tag;
-    use std::collections::HashSet;
-
-    #[test]
-    fn generate_consumer_tag_format() {
-        let tag = generate_consumer_tag();
-        assert!(tag.starts_with("bunny-rs-"));
-        let rest = &tag["bunny-rs-".len()..];
-        let (ms, suffix) = rest.split_once('-').unwrap();
-        assert!(ms.parse::<u64>().is_ok());
-        assert!(suffix.parse::<u32>().is_ok());
-    }
-
-    #[test]
-    fn generate_consumer_tag_is_unique_under_load() {
-        // 1000 invocations, 32 bits of randomness: birthday-paradox collision
-        // probability is ~1.16e-4. A flake here is a real entropy regression.
-        const N: usize = 1000;
-        let mut seen = HashSet::with_capacity(N);
-        for _ in 0..N {
-            assert!(seen.insert(generate_consumer_tag()));
-        }
     }
 }

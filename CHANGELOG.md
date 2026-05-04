@@ -2,7 +2,15 @@
 
 ## v0.11.0 (in development)
 
-No changes yet.
+### Enhancements
+
+ * `Delivery` gained `nack_discard` and `nack_discard_multiple`: the `requeue = false`
+   counterparts to `nack` and `nack_multiple`. Combined with the existing `ack`, `ack_multiple`,
+   `nack`, `nack_multiple`, `reject`, and `discard`, this provides a high level
+   [consumer acknowledgement](https://www.rabbitmq.com/docs/confirms) API right on
+   the `Delivery` struct
+
+ * `Channel` gained matching `nack`, `nack_discard`, and `nack_discard_multiple` shortcuts
 
 
 ## v0.10.0 (Mar 26, 2026)

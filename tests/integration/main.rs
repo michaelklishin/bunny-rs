@@ -19,6 +19,7 @@ mod consumer_trait_tests;
 mod credential_refresh_tests;
 mod dead_letter_tests;
 mod delivery_ack_tests;
+mod delivery_nack_tests;
 mod exchange_tests;
 mod headers_exchange_tests;
 mod large_payload_tests;

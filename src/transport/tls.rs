@@ -10,6 +10,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use rustls_platform_verifier::ConfigVerifierExt;
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 
@@ -24,8 +25,6 @@ pub struct TlsOptions {
 impl TlsOptions {
     /// TLS with platform-native certificate verification.
     pub fn new(server_name: &str) -> Result<Self, io::Error> {
-        use rustls_platform_verifier::ConfigVerifierExt;
-
         let server_name = ServerName::try_from(server_name.to_string())
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
 

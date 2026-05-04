@@ -2,7 +2,9 @@
 // Licensed under the Apache License 2.0 and MIT licenses.
 // See LICENSE-APACHE and LICENSE-MIT in the repository root for details.
 
+mod prop_ack_methods;
 mod prop_confirm;
+mod prop_consumer_tag;
 mod prop_endpoint;
 mod prop_field_table;
 mod prop_frame;
